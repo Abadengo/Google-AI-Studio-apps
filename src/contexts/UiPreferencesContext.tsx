@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { Category } from '../types/finance';
+import { DEFAULT_CATEGORIES } from '../data/defaultState';
 
 export type ThemeMode = 'light' | 'dark';
 export type LanguageCode = 'es' | 'en';
@@ -33,8 +34,8 @@ const CATEGORY_EN_MAP: Record<string, string> = {
   cat_ocio: 'Leisure & Travel',
   cat_otros_gastos: 'Other Expenses',
   cat_sueldo: 'Salary',
-  cat_dividendos: 'Moomoo Dividends',
-  cat_intereses: 'GoalSaver Interest',
+  cat_dividendos: 'Dividends',
+  cat_intereses: 'Interest',
   cat_otros_ingresos: 'Other Income',
   cat_transfer: 'Internal Transfer',
 };
@@ -98,7 +99,9 @@ export function UiPreferencesProvider({ children }: { children: React.ReactNode 
   const catName = useCallback(
     (cat?: Category | null, fallback = '') => {
       if (!cat) return fallback || (lang === 'en' ? 'Category' : 'Categoría');
-      if (lang === 'en' && CATEGORY_EN_MAP[cat.id]) {
+      // Translate default categories only while the user hasn't renamed them.
+      const defaultName = DEFAULT_CATEGORIES.find((c) => c.id === cat.id)?.name;
+      if (lang === 'en' && CATEGORY_EN_MAP[cat.id] && (!defaultName || defaultName === cat.name)) {
         return CATEGORY_EN_MAP[cat.id];
       }
       return cat.name;

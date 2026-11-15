@@ -16,13 +16,25 @@ export type CurrencyCode = 'AUD' | 'USD' | 'EUR' | 'ARS' | 'MXN' | 'CLP';
 
 export type TransactionType = 'expense' | 'income' | 'transfer';
 
-export type AccountKind = 'commbank' | 'goalsaver' | 'revolut' | 'moomoo' | 'wise' | 'cash' | 'other';
+/** Generic account types (v2). Bank/broker names live in `institution`, never in the type. */
+export type AccountKind =
+  | 'transaccional' // cuenta corriente / débito
+  | 'ahorro'
+  | 'inversion'
+  | 'tarjeta_credito'
+  | 'efectivo'
+  | 'otra';
+
+/** Account kinds used before data version 2 (kept only for migrations). */
+export type LegacyAccountKind = 'commbank' | 'goalsaver' | 'revolut' | 'moomoo' | 'wise' | 'cash' | 'other';
 
 export interface Account {
   id: string;
   name: string;
   owner: ProfileId;
   kind: AccountKind;
+  /** Optional, informative only (e.g. "CommBank"). Typed by the user. */
+  institution?: string;
   currency: CurrencyCode;
   initialBalance: number;
   notes?: string;
@@ -68,19 +80,30 @@ export interface Budget {
   currency: CurrencyCode;
 }
 
-export interface GoalSaverProfile {
+/**
+ * Interest settings for a savings account ("cuenta de ahorro con interés").
+ * When `accountId` points to an account of kind 'ahorro', the live balance of that account is used;
+ * otherwise `currentBalance` is used.
+ */
+export interface SavingsInterestConfig {
+  id: string;
   owner: ProfileId;
-  accountName: string;
+  accountId?: string;
+  /** true → projections use the linked account's live balance; false → use `currentBalance`. */
+  useAccountBalance: boolean;
+  name: string;
   currentBalance: number;
   monthlyContribution: number;
-  baseRateAnnual: number; // e.g. 0.45%
-  bonusRateAnnual: number; // e.g. 4.45% (paid if balance grows monthly)
+  baseRateAnnual: number; // % anual base
+  bonusRateAnnual: number; // % anual adicional si se cumple la condición (aportar cada mes)
   currency: CurrencyCode;
 }
 
-export interface MoomooHolding {
+export interface InvestmentHolding {
   id: string;
   owner: ProfileId;
+  /** Optional link to an account of kind 'inversion'. */
+  accountId?: string;
   ticker: string;
   name: string;
   assetType: 'ETF' | 'Acción' | 'Fondo';
@@ -113,18 +136,24 @@ export interface ExchangeRates {
   CLP: number;
 }
 
+export const CURRENT_DATA_VERSION = 2;
+
 export interface FinanceState {
   version: number;
   displayCurrency: CurrencyCode;
   exchangeRates: ExchangeRates;
+  /** ISO timestamp of the last manual edit or live update of exchange rates. */
+  exchangeRatesUpdatedAt?: string;
   profiles: UserProfile[];
   accounts: Account[];
   categories: Category[];
   transactions: Transaction[];
   budgets: Budget[];
-  goalSavers: Record<string, GoalSaverProfile>;
-  moomooHoldings: MoomooHolding[];
+  savingsConfigs: SavingsInterestConfig[];
+  investments: InvestmentHolding[];
   fixedExpenses: FixedExpense[];
   fixedExpensePaidByMonth: Record<string, Record<string, boolean>>;
+  /** ISO timestamp of the last .json backup download. */
+  lastBackupAt?: string;
   isSampleData: boolean;
 }

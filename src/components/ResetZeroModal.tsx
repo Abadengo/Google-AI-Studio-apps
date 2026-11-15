@@ -6,7 +6,7 @@ import { getProfileLabel } from '../utils/formatters';
 
 export interface ResetToZeroPayload {
   accounts: boolean;
-  moomoo: boolean;
+  investments: boolean;
   transactions: boolean;
   scope: ProfileFilter;
 }
@@ -29,7 +29,7 @@ export function ResetZeroModal({
   const { tr } = useUiPreferences();
 
   const [zeroAccounts, setZeroAccounts] = useState(true);
-  const [zeroMoomoo, setZeroMoomoo] = useState(true);
+  const [zeroInvestments, setZeroInvestments] = useState(true);
   const [zeroTransactions, setZeroTransactions] = useState(true);
   const [scope, setScope] = useState<ProfileFilter>(activeProfile);
   const [doneMsg, setDoneMsg] = useState('');
@@ -37,7 +37,7 @@ export function ResetZeroModal({
   useEffect(() => {
     if (isOpen) {
       setZeroAccounts(true);
-      setZeroMoomoo(true);
+      setZeroInvestments(true);
       setZeroTransactions(true);
       setScope(activeProfile);
       setDoneMsg('');
@@ -48,26 +48,26 @@ export function ResetZeroModal({
 
   const matchesScope = (owner: string) => scope === 'all' || owner === scope;
   const affectedAccountsCount = state.accounts.filter((a) => matchesScope(a.owner)).length;
-  const affectedMoomooCount = state.moomooHoldings.filter((h) => matchesScope(h.owner)).length;
+  const affectedInvestmentCount = state.investments.filter((h) => matchesScope(h.owner)).length;
   const affectedTxCount = state.transactions.filter((t) => matchesScope(t.owner)).length;
   const scopeLabel =
     scope === 'all'
       ? tr('Todo el hogar', 'Entire household')
       : getProfileLabel(scope, state.profiles);
 
-  const nothingSelected = !zeroAccounts && !zeroMoomoo && !zeroTransactions;
+  const nothingSelected = !zeroAccounts && !zeroInvestments && !zeroTransactions;
 
   const handleConfirm = () => {
     if (nothingSelected) return;
     onResetToZero({
       accounts: zeroAccounts,
-      moomoo: zeroMoomoo,
+      investments: zeroInvestments,
       transactions: zeroTransactions,
       scope,
     });
     const parts: string[] = [];
-    if (zeroAccounts) parts.push(tr('saldos por cuenta y GoalSaver', 'account & GoalSaver balances'));
-    if (zeroMoomoo) parts.push(tr('saldos de Moomoo', 'Moomoo balances'));
+    if (zeroAccounts) parts.push(tr('saldos por cuenta y fondos de ahorro', 'account & savings balances'));
+    if (zeroInvestments) parts.push(tr('saldos de inversiones', 'investment balances'));
     if (zeroTransactions) parts.push(tr('movimientos', 'transactions'));
     setDoneMsg(
       tr(
@@ -156,7 +156,7 @@ export function ResetZeroModal({
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm font-semibold text-[#031725] dark:text-[#DAEAFF]">
-                    {tr('Saldos por cuenta y GoalSaver → $0.00', 'Account & GoalSaver balances → $0.00')}
+                    {tr('Saldos por cuenta y fondos de ahorro → $0.00', 'Account & savings balances → $0.00')}
                   </span>
                   <span className="text-xs font-mono-num text-[#5A7694] dark:text-[#A1C6F6]">
                     {affectedAccountsCount} {tr('cuentas', 'accounts')}
@@ -164,8 +164,8 @@ export function ResetZeroModal({
                 </div>
                 <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6] mt-0.5">
                   {tr(
-                    'Reinicia a 0 el saldo inicial de cada cuenta bancaria y el capital actual de GoalSaver.',
-                    'Resets initial balance of every bank account and GoalSaver current balance to 0.'
+                    'Reinicia a 0 el saldo inicial de cada cuenta y el capital de los fondos de ahorro con interés.',
+                    'Resets the initial balance of every account and the capital of savings funds to 0.'
                   )}
                 </p>
               </div>
@@ -174,23 +174,23 @@ export function ResetZeroModal({
             <label className="flex items-start gap-3 p-3.5 rounded-xl border border-[#D3E3FA] dark:border-[#123B66] bg-[#F8FBFF] dark:bg-[#041E32] cursor-pointer hover:border-[#499BED] transition-colors">
               <input
                 type="checkbox"
-                checked={zeroMoomoo}
-                onChange={(e) => setZeroMoomoo(e.target.checked)}
+                checked={zeroInvestments}
+                onChange={(e) => setZeroInvestments(e.target.checked)}
                 className="mt-0.5 rounded border-[#C6DAF7] dark:border-[#1B4A7C] accent-[#499BED]"
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm font-semibold text-[#031725] dark:text-[#DAEAFF]">
-                    {tr('Saldos en Moomoo → $0.00', 'Moomoo balances → $0.00')}
+                    {tr('Saldos de inversiones → $0.00', 'Investment balances → $0.00')}
                   </span>
                   <span className="text-xs font-mono-num text-[#5A7694] dark:text-[#A1C6F6]">
-                    {affectedMoomooCount} {tr('activos', 'holdings')}
+                    {affectedInvestmentCount} {tr('activos', 'holdings')}
                   </span>
                 </div>
                 <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6] mt-0.5">
                   {tr(
-                    'Deja en 0 el capital invertido, valor actual, dividendos y cuentas vinculadas a Moomoo.',
-                    'Resets Moomoo invested capital, current value, dividends, and Moomoo account balances to 0.'
+                    'Elimina las posiciones de inversión y deja en 0 el saldo de las cuentas de tipo Inversión.',
+                    'Removes investment holdings and resets the balance of Investment accounts to 0.'
                   )}
                 </p>
               </div>

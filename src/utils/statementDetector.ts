@@ -7,7 +7,7 @@ import type {
   Transaction,
   UserProfile,
 } from '../types/finance';
-import { getProfileLabel, type CsvPreset } from './formatters';
+import { getProfileLabel, suggestedKindForFormat, type CsvPreset } from './formatters';
 
 export type DetectionConfidence = 'high' | 'medium' | 'fallback';
 
@@ -15,6 +15,8 @@ export interface SuggestedNewAccount {
   name: string;
   owner: ProfileId;
   kind: AccountKind;
+  /** Institution inferred from the file (informative). */
+  institution?: string;
   currency: CurrencyCode;
   notes: string;
 }
@@ -32,8 +34,6 @@ export interface StatementDetectionResult {
 }
 
 const GENERIC_ACCOUNT_TOKENS = new Set([
-  'abdiel',
-  'lara',
   'commbank',
   'commonwealth',
   'goalsaver',
@@ -69,21 +69,21 @@ const KNOWN_EXTERNAL_BANKS: Array<{
   label: string;
   kind: AccountKind;
 }> = [
-  { keywords: ['ing direct', 'ing australia', 'orange everyday', 'savings maximiser'], label: 'ING Bank', kind: 'other' },
-  { keywords: ['anz bank', 'anz plus', 'australia and new zealand banking'], label: 'ANZ', kind: 'other' },
-  { keywords: ['nab', 'national australia bank'], label: 'NAB', kind: 'other' },
-  { keywords: ['westpac'], label: 'Westpac', kind: 'other' },
-  { keywords: ['macquarie bank', 'macquarie'], label: 'Macquarie Bank', kind: 'other' },
-  { keywords: ['up bank', 'upbank'], label: 'Up Bank', kind: 'other' },
-  { keywords: ['ubank'], label: 'ubank', kind: 'other' },
-  { keywords: ['hsbc'], label: 'HSBC', kind: 'other' },
-  { keywords: ['american express', 'amex'], label: 'American Express', kind: 'other' },
-  { keywords: ['paypal'], label: 'PayPal', kind: 'other' },
-  { keywords: ['bendigo bank', 'bendigo'], label: 'Bendigo Bank', kind: 'other' },
-  { keywords: ['suncorp'], label: 'Suncorp', kind: 'other' },
-  { keywords: ['citibank', 'citi'], label: 'Citibank', kind: 'other' },
-  { keywords: ['stripe'], label: 'Stripe', kind: 'other' },
-  { keywords: ['binance'], label: 'Binance', kind: 'other' },
+  { keywords: ['ing direct', 'ing australia', 'orange everyday', 'savings maximiser'], label: 'ING Bank', kind: 'transaccional' },
+  { keywords: ['anz bank', 'anz plus', 'australia and new zealand banking'], label: 'ANZ', kind: 'transaccional' },
+  { keywords: ['nab', 'national australia bank'], label: 'NAB', kind: 'transaccional' },
+  { keywords: ['westpac'], label: 'Westpac', kind: 'transaccional' },
+  { keywords: ['macquarie bank', 'macquarie'], label: 'Macquarie Bank', kind: 'transaccional' },
+  { keywords: ['up bank', 'upbank'], label: 'Up Bank', kind: 'transaccional' },
+  { keywords: ['ubank'], label: 'ubank', kind: 'transaccional' },
+  { keywords: ['hsbc'], label: 'HSBC', kind: 'transaccional' },
+  { keywords: ['american express', 'amex'], label: 'American Express', kind: 'tarjeta_credito' },
+  { keywords: ['paypal'], label: 'PayPal', kind: 'transaccional' },
+  { keywords: ['bendigo bank', 'bendigo'], label: 'Bendigo Bank', kind: 'transaccional' },
+  { keywords: ['suncorp'], label: 'Suncorp', kind: 'transaccional' },
+  { keywords: ['citibank', 'citi'], label: 'Citibank', kind: 'transaccional' },
+  { keywords: ['stripe'], label: 'Stripe', kind: 'transaccional' },
+  { keywords: ['binance'], label: 'Binance', kind: 'transaccional' },
 ];
 
 function normalizeSearchableText(input: string): string {
@@ -144,24 +144,39 @@ export function refinePresetWithContext(
   return 'generic';
 }
 
+/** Institution implied by a detected file format (informative only). */
+function institutionForFormat(preset: CsvPreset): string | undefined {
+  if (preset === 'commbank' || preset === 'goalsaver') return 'CommBank';
+  if (preset === 'revolut') return 'Revolut';
+  if (preset === 'moomoo') return 'Moomoo';
+  return undefined;
+}
+
 function presetToAccountKind(
   preset: CsvPreset,
   rawContextNormalized: string
 ): AccountKind | null {
-  if (preset === 'commbank') return 'commbank';
-  if (preset === 'goalsaver') return 'goalsaver';
-  if (preset === 'revolut') return 'revolut';
-  if (preset === 'moomoo') return 'moomoo';
-  if (preset === 'generic') {
-    if (countWordMatches(rawContextNormalized, 'wise') > 0) return 'wise';
-    if (
-      countWordMatches(rawContextNormalized, 'cash') > 0 ||
-      countWordMatches(rawContextNormalized, 'efectivo') > 0
-    ) {
-      return 'cash';
-    }
+  if (preset !== 'generic' && preset !== 'auto') return suggestedKindForFormat(preset);
+  if (
+    countWordMatches(rawContextNormalized, 'cash') > 0 ||
+    countWordMatches(rawContextNormalized, 'efectivo') > 0
+  ) {
+    return 'efectivo';
+  }
+  if (countWordMatches(rawContextNormalized, 'credit card') > 0 || countWordMatches(rawContextNormalized, 'tarjeta de credito') > 0) {
+    return 'tarjeta_credito';
   }
   return null;
+}
+
+function institutionMatches(acc: Account, institution: string | undefined): boolean {
+  if (!institution) return false;
+  const needle = institution.toLowerCase();
+  return (
+    (acc.institution || '').toLowerCase().includes(needle) ||
+    acc.name.toLowerCase().includes(needle) ||
+    (acc.notes || '').toLowerCase().includes(needle)
+  );
 }
 
 function detectExternalBankBrand(normalizedCtx: string): { label: string; kind: AccountKind } | null {
@@ -188,6 +203,16 @@ export function pickAccountForOwnerAndPreset(
   const normalizedCtx = normalizeSearchableText(rawContext || '');
   const desiredKind = presetToAccountKind(chosenPreset, normalizedCtx);
 
+  const institution = institutionForFormat(chosenPreset);
+  if (institution) {
+    const byInstitution = pool.filter(
+      (a) => institutionMatches(a, institution) && (!desiredKind || a.kind === desiredKind)
+    );
+    if (byInstitution.length > 0) {
+      return (preferredCurrency && byInstitution.find((a) => a.currency === preferredCurrency)) || byInstitution[0];
+    }
+  }
+
   if (desiredKind) {
     const byKind = pool.filter((a) => a.kind === desiredKind);
     if (byKind.length > 0) {
@@ -210,14 +235,20 @@ export function pickAccountForOwnerAndPreset(
 function findDirectAccountMatch(
   accounts: Account[],
   fileName: string,
-  rawText: string
+  rawText: string,
+  profiles: UserProfile[] = []
 ): Account | undefined {
+  // Profile names appear in every statement of that person, so they never identify one account.
+  const profileTokens = new Set(
+    profiles.flatMap((p) => normalizeSearchableText(p.name).split(' ')).filter((t) => t.length >= 3)
+  );
   const compactDoc = `${fileName}\n${rawText.slice(0, 4000)}`.toLowerCase();
   const normalizedDoc = normalizeSearchableText(`${fileName} ${rawText.slice(0, 4000)}`);
   const digitsOnlyDoc = compactDoc.replace(/[^0-9]/g, '');
 
   for (const acc of accounts) {
     const sourceMeta = `${acc.name} ${acc.notes || ''}`;
+    const institutionTokens = new Set(normalizeSearchableText(acc.institution || '').split(' '));
     // Account-number style tokens only (ignore years such as "2025" that appear in every statement).
     const digitTokens = (sourceMeta.match(/\d{4,}/g) || []).filter(
       (d) => !(d.length === 4 && /^(19|20)\d{2}$/.test(d))
@@ -232,7 +263,10 @@ function findDirectAccountMatch(
 
     const customTokens = normalizeSearchableText(sourceMeta)
       .split(' ')
-      .filter((tok) => tok.length >= 4 && !GENERIC_ACCOUNT_TOKENS.has(tok) && !/^\d+$/.test(tok));
+      .filter(
+        (tok) =>
+          tok.length >= 4 && !GENERIC_ACCOUNT_TOKENS.has(tok) && !profileTokens.has(tok) && !institutionTokens.has(tok) && !/^\d+$/.test(tok)
+      );
     if (customTokens.length > 0 && customTokens.some((tok) => countWordMatches(normalizedDoc, tok) > 0)) {
       return acc;
     }
@@ -249,67 +283,24 @@ function buildSuggestedNewAccount(params: {
   normalizedCtx: string;
 }): SuggestedNewAccount {
   const { owner, preset, currency, externalBank, normalizedCtx } = params;
-  if (externalBank) {
-    return {
-      name: `${externalBank.label} (${currency})`,
-      owner,
-      kind: externalBank.kind,
-      currency,
-      notes: 'Cuenta creada automáticamente desde statement importado',
-    };
-  }
-  if (preset === 'commbank') {
-    return {
-      name: `CommBank (${currency})`,
-      owner,
-      kind: 'commbank',
-      currency,
-      notes: 'Cuenta principal CommBank',
-    };
-  }
-  if (preset === 'goalsaver') {
-    return {
-      name: `CommBank GoalSaver (${currency})`,
-      owner,
-      kind: 'goalsaver',
-      currency,
-      notes: 'Cuenta de ahorro GoalSaver',
-    };
-  }
-  if (preset === 'revolut') {
-    return {
-      name: `Revolut (${currency})`,
-      owner,
-      kind: 'revolut',
-      currency,
-      notes: 'Tarjeta diaria Revolut',
-    };
-  }
-  if (preset === 'moomoo') {
-    return {
-      name: `Moomoo (${currency})`,
-      owner,
-      kind: 'moomoo',
-      currency,
-      notes: 'Broker Moomoo',
-    };
-  }
-  const desiredKind = presetToAccountKind(preset, normalizedCtx);
-  if (desiredKind === 'wise') {
-    return {
-      name: `Wise (${currency})`,
-      owner,
-      kind: 'wise',
-      currency,
-      notes: 'Cuenta multidivisa Wise',
-    };
-  }
+  const kind = externalBank?.kind || presetToAccountKind(preset, normalizedCtx) || 'otra';
+  const institution = externalBank?.label || institutionForFormat(preset);
+  const kindName: Record<AccountKind, string> = {
+    transaccional: 'Cuenta',
+    ahorro: 'Ahorro',
+    inversion: 'Inversiones',
+    tarjeta_credito: 'Tarjeta de crédito',
+    efectivo: 'Efectivo',
+    otra: 'Cuenta',
+  };
   return {
-    name: `Nueva Cuenta (${currency})`,
+    // The name is only a suggestion the user can edit; the bank goes to `institution`.
+    name: `${kindName[kind]}${institution ? ` ${institution}` : ''} (${currency})`,
     owner,
-    kind: desiredKind || 'other',
+    kind,
+    institution,
     currency,
-    notes: 'Cuenta detectada al importar statement',
+    notes: 'Cuenta creada al importar un extracto',
   };
 }
 
@@ -333,7 +324,7 @@ export function detectStatementOwnerAndAccount(params: {
   } = params;
 
   const refinedPreset = refinePresetWithContext(detectedPreset, fileName, rawText);
-  const directAccountMatch = findDirectAccountMatch(accounts, fileName, rawText);
+  const directAccountMatch = findDirectAccountMatch(accounts, fileName, rawText, profiles);
 
   const normFile = normalizeSearchableText(fileName);
   const normHead = normalizeSearchableText(rawText.slice(0, 2200));
@@ -351,12 +342,7 @@ export function detectStatementOwnerAndAccount(params: {
 
   // Dynamically score every configured profile
   const effectiveProfiles: Array<{ id: ProfileId; name: string; email?: string }> =
-    profiles.length > 0
-      ? profiles
-      : [
-          { id: 'abdiel', name: 'Abdiel' },
-          { id: 'lara', name: 'Lara' },
-        ];
+    profiles.length > 0 ? profiles : [{ id: activeProfile === 'all' ? 'perfil' : activeProfile, name: '' }];
 
   let bestProfile: { id: ProfileId; name: string } = effectiveProfiles[0];
   let bestScore = 0;
@@ -464,6 +450,7 @@ export function detectStatementOwnerAndAccount(params: {
     const extLower = externalBank.label.toLowerCase();
     const matchingExternal = ownerAccounts.find(
       (a) =>
+        (a.institution || '').toLowerCase().includes(extLower) ||
         a.name.toLowerCase().includes(extLower) ||
         (a.notes || '').toLowerCase().includes(extLower)
     );
@@ -473,9 +460,14 @@ export function detectStatementOwnerAndAccount(params: {
       matchedExistingAccount = false;
     }
   } else if (desiredKind) {
-    const matchingKind = ownerAccounts.find(
-      (a) => a.kind === desiredKind && a.currency === detectedCurrency
-    ) || ownerAccounts.find((a) => a.kind === desiredKind);
+    const formatInstitution = institutionForFormat(refinedPreset);
+    const matchingKind =
+      ownerAccounts.find(
+        (a) => a.kind === desiredKind && institutionMatches(a, formatInstitution) && a.currency === detectedCurrency
+      ) ||
+      ownerAccounts.find((a) => a.kind === desiredKind && institutionMatches(a, formatInstitution)) ||
+      ownerAccounts.find((a) => a.kind === desiredKind && a.currency === detectedCurrency) ||
+      ownerAccounts.find((a) => a.kind === desiredKind);
     if (matchingKind) {
       matchedAcc = matchingKind;
     } else {

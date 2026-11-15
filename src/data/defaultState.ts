@@ -1,15 +1,19 @@
-import type {
-  Account,
-  Budget,
-  Category,
-  FinanceState,
-  FixedExpense,
-  GoalSaverProfile,
-  MoomooHolding,
-  ProfileId,
-  Transaction,
-  UserProfile,
+import {
+  CURRENT_DATA_VERSION,
+  type Account,
+  type Budget,
+  type Category,
+  type FinanceState,
+  type FixedExpense,
+  type InvestmentHolding,
+  type ProfileId,
+  type SavingsInterestConfig,
+  type Transaction,
+  type UserProfile,
 } from '../types/finance';
+
+// Everything in this file is generic EXAMPLE data shown on first launch.
+// Real profiles, accounts and institutions are created and edited from the app.
 
 export const PROFILE_COLOR_PALETTE = [
   '#022E5B',
@@ -22,39 +26,32 @@ export const PROFILE_COLOR_PALETTE = [
 ];
 
 export const DEFAULT_PROFILES: UserProfile[] = [
-  {
-    id: 'abdiel',
-    name: 'Abdiel',
-    role: 'Titular principal',
-    email: '',
-    phone: '',
-    country: 'Australia',
-    notes: '',
-    color: '#022E5B',
-  },
-  {
-    id: 'lara',
-    name: 'Lara',
-    role: 'Co-titular',
-    email: '',
-    phone: '',
-    country: 'Australia',
-    notes: '',
-    color: '#499BED',
-  },
+  { id: 'perfil_a', name: 'Persona A', role: 'Titular', email: '', phone: '', country: '', notes: '', color: '#022E5B' },
+  { id: 'perfil_b', name: 'Persona B', role: 'Co-titular', email: '', phone: '', country: '', notes: '', color: '#499BED' },
 ];
 
-export function createDefaultGoalSaverForProfile(
-  profile: Pick<UserProfile, 'id' | 'name'>
-): GoalSaverProfile {
+export const DEFAULT_SAVINGS_BASE_RATE = 0.5;
+export const DEFAULT_SAVINGS_BONUS_RATE = 4;
+
+export function createSavingsConfig(params: {
+  owner: ProfileId;
+  name: string;
+  accountId?: string;
+  currency?: SavingsInterestConfig['currency'];
+  currentBalance?: number;
+  monthlyContribution?: number;
+}): SavingsInterestConfig {
   return {
-    owner: profile.id,
-    accountName: `CommBank GoalSaver · ${profile.name}`,
-    currentBalance: 0,
-    monthlyContribution: 500,
-    baseRateAnnual: 0.45,
-    bonusRateAnnual: 4.45,
-    currency: 'AUD',
+    id: `sav_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    owner: params.owner,
+    accountId: params.accountId,
+    useAccountBalance: Boolean(params.accountId),
+    name: params.name,
+    currentBalance: params.currentBalance ?? 0,
+    monthlyContribution: params.monthlyContribution ?? 0,
+    baseRateAnnual: DEFAULT_SAVINGS_BASE_RATE,
+    bonusRateAnnual: DEFAULT_SAVINGS_BONUS_RATE,
+    currency: params.currency ?? 'AUD',
   };
 }
 
@@ -70,215 +67,54 @@ export const DEFAULT_CATEGORIES: Category[] = [
   { id: 'cat_ocio', name: 'Ocio y Viajes', type: 'expense', color: '#0891B2' },
   { id: 'cat_otros_gastos', name: 'Otros Gastos', type: 'expense', color: '#64748B' },
   { id: 'cat_sueldo', name: 'Sueldo', type: 'income', color: '#15803D' },
-  { id: 'cat_dividendos', name: 'Dividendos Moomoo', type: 'income', color: '#0284C7' },
-  { id: 'cat_intereses', name: 'Intereses GoalSaver', type: 'income', color: '#059669' },
+  { id: 'cat_dividendos', name: 'Dividendos', type: 'income', color: '#0284C7' },
+  { id: 'cat_intereses', name: 'Intereses', type: 'income', color: '#059669' },
   { id: 'cat_otros_ingresos', name: 'Otros Ingresos', type: 'income', color: '#4F46E5' },
   { id: 'cat_transfer', name: 'Transferencia Interna', type: 'both', color: '#94A3B8' },
 ];
 
+const A = 'perfil_a';
+const B = 'perfil_b';
+
 export const DEFAULT_ACCOUNTS: Account[] = [
-  {
-    id: 'acc_abdiel_commbank',
-    name: 'CommBank (Sueldo)',
-    owner: 'abdiel',
-    kind: 'commbank',
-    currency: 'AUD',
-    initialBalance: 3200,
-    notes: 'Cuenta principal donde entra el sueldo',
-  },
-  {
-    id: 'acc_abdiel_goalsaver',
-    name: 'CommBank GoalSaver',
-    owner: 'abdiel',
-    kind: 'goalsaver',
-    currency: 'AUD',
-    initialBalance: 18500,
-    notes: 'Ahorro colchón con interés bonus mensual',
-  },
-  {
-    id: 'acc_abdiel_revolut',
-    name: 'Revolut (Gastos diarios)',
-    owner: 'abdiel',
-    kind: 'revolut',
-    currency: 'AUD',
-    initialBalance: 850,
-    notes: 'Tarjeta diaria y pagos cotidianos',
-  },
-  {
-    id: 'acc_abdiel_moomoo',
-    name: 'Moomoo (Inversiones)',
-    owner: 'abdiel',
-    kind: 'moomoo',
-    currency: 'USD',
-    initialBalance: 450,
-    notes: 'Broker de acciones y ETFs',
-  },
-  {
-    id: 'acc_lara_commbank',
-    name: 'CommBank (Sueldo)',
-    owner: 'lara',
-    kind: 'commbank',
-    currency: 'AUD',
-    initialBalance: 2950,
-    notes: 'Cuenta principal donde entra el sueldo',
-  },
-  {
-    id: 'acc_lara_goalsaver',
-    name: 'CommBank GoalSaver',
-    owner: 'lara',
-    kind: 'goalsaver',
-    currency: 'AUD',
-    initialBalance: 16200,
-    notes: 'Ahorro colchón con interés bonus mensual',
-  },
-  {
-    id: 'acc_lara_revolut',
-    name: 'Revolut (Gastos diarios)',
-    owner: 'lara',
-    kind: 'revolut',
-    currency: 'AUD',
-    initialBalance: 720,
-    notes: 'Tarjeta diaria y pagos cotidianos',
-  },
-  {
-    id: 'acc_lara_moomoo',
-    name: 'Moomoo (Inversiones)',
-    owner: 'lara',
-    kind: 'moomoo',
-    currency: 'USD',
-    initialBalance: 380,
-    notes: 'Broker de acciones y ETFs',
-  },
-  {
-    id: 'acc_abdiel_wise',
-    name: 'Wise',
-    owner: 'abdiel',
-    kind: 'wise',
-    currency: 'USD',
-    initialBalance: 400,
-    notes: 'Transferencias internacionales',
-  },
-  {
-    id: 'acc_lara_efectivo',
-    name: 'Efectivo',
-    owner: 'lara',
-    kind: 'cash',
-    currency: 'AUD',
-    initialBalance: 180,
-    notes: 'Dinero en efectivo',
-  },
+  { id: 'acc_a_sueldo', name: 'Cuenta sueldo', owner: A, kind: 'transaccional', currency: 'AUD', initialBalance: 2500, notes: 'Donde entra el sueldo' },
+  { id: 'acc_a_ahorro', name: 'Fondo de ahorro', owner: A, kind: 'ahorro', currency: 'AUD', initialBalance: 12000, notes: 'Ahorro con interés' },
+  { id: 'acc_a_diario', name: 'Gastos diarios', owner: A, kind: 'transaccional', currency: 'AUD', initialBalance: 600 },
+  { id: 'acc_a_inversion', name: 'Inversiones', owner: A, kind: 'inversion', currency: 'USD', initialBalance: 300 },
+  { id: 'acc_b_sueldo', name: 'Cuenta sueldo', owner: B, kind: 'transaccional', currency: 'AUD', initialBalance: 2200, notes: 'Donde entra el sueldo' },
+  { id: 'acc_b_ahorro', name: 'Fondo de ahorro', owner: B, kind: 'ahorro', currency: 'AUD', initialBalance: 9000, notes: 'Ahorro con interés' },
+  { id: 'acc_b_tarjeta', name: 'Tarjeta de crédito', owner: B, kind: 'tarjeta_credito', currency: 'AUD', initialBalance: 0 },
+  { id: 'acc_b_efectivo', name: 'Efectivo', owner: B, kind: 'efectivo', currency: 'AUD', initialBalance: 150 },
 ];
 
-export const DEFAULT_GOALSAVERS: Record<ProfileId, GoalSaverProfile> = {
-  abdiel: {
-    owner: 'abdiel',
-    accountName: 'CommBank GoalSaver · Abdiel',
-    currentBalance: 18500,
-    monthlyContribution: 800,
-    baseRateAnnual: 0.45,
-    bonusRateAnnual: 4.45,
-    currency: 'AUD',
-  },
-  lara: {
-    owner: 'lara',
-    accountName: 'CommBank GoalSaver · Lara',
-    currentBalance: 16200,
-    monthlyContribution: 700,
-    baseRateAnnual: 0.45,
-    bonusRateAnnual: 4.45,
-    currency: 'AUD',
-  },
-};
+export const DEFAULT_SAVINGS_CONFIGS: SavingsInterestConfig[] = [
+  { id: 'sav_a', owner: A, accountId: 'acc_a_ahorro', useAccountBalance: true, name: 'Fondo de ahorro', currentBalance: 0, monthlyContribution: 500, baseRateAnnual: DEFAULT_SAVINGS_BASE_RATE, bonusRateAnnual: DEFAULT_SAVINGS_BONUS_RATE, currency: 'AUD' },
+  { id: 'sav_b', owner: B, accountId: 'acc_b_ahorro', useAccountBalance: true, name: 'Fondo de ahorro', currentBalance: 0, monthlyContribution: 400, baseRateAnnual: DEFAULT_SAVINGS_BASE_RATE, bonusRateAnnual: DEFAULT_SAVINGS_BONUS_RATE, currency: 'AUD' },
+];
 
 export const DEFAULT_BUDGETS: Budget[] = [
-  { id: 'bud_vivienda', categoryId: 'cat_vivienda', owner: 'all', monthlyLimit: 2400, currency: 'AUD' },
-  { id: 'bud_super', categoryId: 'cat_supermercado', owner: 'all', monthlyLimit: 900, currency: 'AUD' },
-  { id: 'bud_rest', categoryId: 'cat_restaurantes', owner: 'all', monthlyLimit: 350, currency: 'AUD' },
-  { id: 'bud_transp', categoryId: 'cat_transporte', owner: 'all', monthlyLimit: 300, currency: 'AUD' },
-  { id: 'bud_serv', categoryId: 'cat_servicios', owner: 'all', monthlyLimit: 320, currency: 'AUD' },
-  { id: 'bud_susc', categoryId: 'cat_suscripciones', owner: 'all', monthlyLimit: 120, currency: 'AUD' },
-  { id: 'bud_compras', categoryId: 'cat_compras', owner: 'all', monthlyLimit: 300, currency: 'AUD' },
-  { id: 'bud_ocio', categoryId: 'cat_ocio', owner: 'all', monthlyLimit: 350, currency: 'AUD' },
+  { id: 'bud_vivienda', categoryId: 'cat_vivienda', owner: 'all', monthlyLimit: 2000, currency: 'AUD' },
+  { id: 'bud_super', categoryId: 'cat_supermercado', owner: 'all', monthlyLimit: 800, currency: 'AUD' },
+  { id: 'bud_rest', categoryId: 'cat_restaurantes', owner: 'all', monthlyLimit: 300, currency: 'AUD' },
+  { id: 'bud_transp', categoryId: 'cat_transporte', owner: 'all', monthlyLimit: 250, currency: 'AUD' },
+  { id: 'bud_serv', categoryId: 'cat_servicios', owner: 'all', monthlyLimit: 300, currency: 'AUD' },
+  { id: 'bud_susc', categoryId: 'cat_suscripciones', owner: 'all', monthlyLimit: 100, currency: 'AUD' },
+  { id: 'bud_compras', categoryId: 'cat_compras', owner: 'all', monthlyLimit: 250, currency: 'AUD' },
+  { id: 'bud_ocio', categoryId: 'cat_ocio', owner: 'all', monthlyLimit: 300, currency: 'AUD' },
 ];
 
-export const DEFAULT_MOOMOO_HOLDINGS: MoomooHolding[] = [
-  {
-    id: 'moo_1',
-    owner: 'abdiel',
-    ticker: 'VOO',
-    name: 'Vanguard S&P 500 ETF',
-    assetType: 'ETF',
-    shares: 12,
-    avgCostPerShare: 445,
-    currentPricePerShare: 518.4,
-    dividendYieldAnnual: 1.32,
-    currency: 'USD',
-  },
-  {
-    id: 'moo_2',
-    owner: 'abdiel',
-    ticker: 'SCHD',
-    name: 'Schwab US Dividend Equity ETF',
-    assetType: 'ETF',
-    shares: 85,
-    avgCostPerShare: 25.8,
-    currentPricePerShare: 28.9,
-    dividendYieldAnnual: 3.45,
-    currency: 'USD',
-  },
-  {
-    id: 'moo_3',
-    owner: 'abdiel',
-    ticker: 'VAS',
-    name: 'Vanguard Australian Shares ETF',
-    assetType: 'ETF',
-    shares: 38,
-    avgCostPerShare: 91.5,
-    currentPricePerShare: 101.2,
-    dividendYieldAnnual: 3.6,
-    currency: 'AUD',
-  },
-  {
-    id: 'moo_4',
-    owner: 'lara',
-    ticker: 'IVV',
-    name: 'iShares S&P 500 ETF (ASX)',
-    assetType: 'ETF',
-    shares: 65,
-    avgCostPerShare: 49.2,
-    currentPricePerShare: 58.6,
-    dividendYieldAnnual: 1.25,
-    currency: 'AUD',
-  },
-  {
-    id: 'moo_5',
-    owner: 'lara',
-    ticker: 'NDQ',
-    name: 'Betashares Nasdaq 100 ETF',
-    assetType: 'ETF',
-    shares: 72,
-    avgCostPerShare: 37.8,
-    currentPricePerShare: 46.1,
-    dividendYieldAnnual: 0.9,
-    currency: 'AUD',
-  },
-  {
-    id: 'moo_6',
-    owner: 'lara',
-    ticker: 'AAPL',
-    name: 'Apple Inc.',
-    assetType: 'Acción',
-    shares: 14,
-    avgCostPerShare: 185,
-    currentPricePerShare: 226.5,
-    dividendYieldAnnual: 0.45,
-    currency: 'USD',
-  },
+export const DEFAULT_INVESTMENTS: InvestmentHolding[] = [
+  { id: 'inv_1', owner: A, accountId: 'acc_a_inversion', ticker: 'VOO', name: 'Vanguard S&P 500 ETF', assetType: 'ETF', shares: 8, avgCostPerShare: 450, currentPricePerShare: 520, dividendYieldAnnual: 1.3, currency: 'USD' },
+  { id: 'inv_2', owner: A, accountId: 'acc_a_inversion', ticker: 'SCHD', name: 'Schwab US Dividend Equity ETF', assetType: 'ETF', shares: 60, avgCostPerShare: 26, currentPricePerShare: 28.5, dividendYieldAnnual: 3.5, currency: 'USD' },
+  { id: 'inv_3', owner: B, ticker: 'VAS', name: 'Vanguard Australian Shares ETF', assetType: 'ETF', shares: 30, avgCostPerShare: 92, currentPricePerShare: 101, dividendYieldAnnual: 3.6, currency: 'AUD' },
+  { id: 'inv_4', owner: B, ticker: 'AAPL', name: 'Apple Inc.', assetType: 'Acción', shares: 10, avgCostPerShare: 185, currentPricePerShare: 225, dividendYieldAnnual: 0.45, currency: 'USD' },
 ];
 
 function monthOffsetDate(monthsAgo: number, day: number): string {
   const now = new Date();
-  const d = new Date(now.getFullYear(), now.getMonth() - monthsAgo, Math.min(day, 28));
+  // Never generate example movements in the future.
+  const maxDay = monthsAgo === 0 ? Math.max(1, now.getDate()) : 28;
+  const d = new Date(now.getFullYear(), now.getMonth() - monthsAgo, Math.min(day, maxDay));
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
@@ -288,12 +124,11 @@ function monthOffsetDate(monthsAgo: number, day: number): string {
 export function buildSampleTransactions(): Transaction[] {
   const list: Transaction[] = [];
   let idx = 1;
-
-  const pushTx = (
+  const push = (
     monthsAgo: number,
     day: number,
     owner: ProfileId,
-    type: 'income' | 'expense' | 'transfer',
+    type: Transaction['type'],
     amount: number,
     currency: 'AUD' | 'USD',
     categoryId: string,
@@ -306,7 +141,7 @@ export function buildSampleTransactions(): Transaction[] {
       owner,
       type,
       date: monthOffsetDate(monthsAgo, day),
-      amount,
+      amount: Number(amount.toFixed(2)),
       currency,
       categoryId,
       accountId,
@@ -317,181 +152,81 @@ export function buildSampleTransactions(): Transaction[] {
   };
 
   for (let m = 5; m >= 0; m--) {
-    // Sueldos en CommBank
-    pushTx(m, 1, 'abdiel', 'income', 4650, 'AUD', 'cat_sueldo', 'acc_abdiel_commbank', 'Sueldo mensual Abdiel');
-    pushTx(m, 1, 'lara', 'income', 4150, 'AUD', 'cat_sueldo', 'acc_lara_commbank', 'Sueldo mensual Lara');
-
-    // Aportes a GoalSaver (transferencias internas)
-    pushTx(
-      m,
-      2,
-      'abdiel',
-      'transfer',
-      800,
-      'AUD',
-      'cat_transfer',
-      'acc_abdiel_commbank',
-      'Ahorro mensual a GoalSaver',
-      'acc_abdiel_goalsaver'
-    );
-    pushTx(
-      m,
-      2,
-      'lara',
-      'transfer',
-      700,
-      'AUD',
-      'cat_transfer',
-      'acc_lara_commbank',
-      'Ahorro mensual a GoalSaver',
-      'acc_lara_goalsaver'
-    );
-
-    // Intereses GoalSaver recibidos
-    pushTx(m, 28, 'abdiel', 'income', 74.2 + (5 - m) * 3.1, 'AUD', 'cat_intereses', 'acc_abdiel_goalsaver', 'Interés mensual CommBank GoalSaver');
-    pushTx(m, 28, 'lara', 'income', 65.1 + (5 - m) * 2.8, 'AUD', 'cat_intereses', 'acc_lara_goalsaver', 'Interés mensual CommBank GoalSaver');
-
-    // Alquiler desde CommBank
-    pushTx(m, 3, 'abdiel', 'expense', 1200, 'AUD', 'cat_vivienda', 'acc_abdiel_commbank', 'Alquiler departamento (50%)');
-    pushTx(m, 3, 'lara', 'expense', 1200, 'AUD', 'cat_vivienda', 'acc_lara_commbank', 'Alquiler departamento (50%)');
-
-    // Servicios
-    pushTx(m, 7, 'abdiel', 'expense', 145 + (m % 2) * 25, 'AUD', 'cat_servicios', 'acc_abdiel_commbank', 'Electricidad y Gas AGL');
-    pushTx(m, 9, 'lara', 'expense', 89, 'AUD', 'cat_servicios', 'acc_lara_commbank', 'Internet Fibra');
-
-    // Gastos diarios en Revolut
-    pushTx(m, 4, 'abdiel', 'expense', 168.4 + m * 6, 'AUD', 'cat_supermercado', 'acc_abdiel_revolut', 'Woolworths compra semanal');
-    pushTx(m, 11, 'lara', 'expense', 194.2 + (m % 3) * 18, 'AUD', 'cat_supermercado', 'acc_lara_revolut', 'Coles y verdulería');
-    pushTx(m, 18, 'abdiel', 'expense', 210.5, 'AUD', 'cat_supermercado', 'acc_abdiel_revolut', 'Aldi & mercado');
-    pushTx(m, 24, 'lara', 'expense', 185.0, 'AUD', 'cat_supermercado', 'acc_lara_revolut', 'Supermercado fin de mes');
-
-    // Restaurantes (en el mes actual m===0 superamos ligeramente el presupuesto para mostrar la alerta!)
-    pushTx(m, 6, 'abdiel', 'expense', 78.5, 'AUD', 'cat_restaurantes', 'acc_abdiel_revolut', 'Cena viernes');
-    pushTx(m, 14, 'lara', 'expense', 94.0, 'AUD', 'cat_restaurantes', 'acc_lara_revolut', 'Brunch domingo');
-    pushTx(m, 20, 'abdiel', 'expense', m === 0 ? 225.0 : 112.0, 'AUD', 'cat_restaurantes', 'acc_abdiel_revolut', m === 0 ? 'Cena aniversario y café' : 'Salida con amigos');
-
-    // Transporte
-    pushTx(m, 8, 'abdiel', 'expense', 92.0, 'AUD', 'cat_transporte', 'acc_abdiel_revolut', 'Opal / Transporte público');
-    pushTx(m, 15, 'lara', 'expense', 110.0, 'AUD', 'cat_transporte', 'acc_lara_revolut', 'Combustible y Uber');
-
-    // Suscripciones
-    pushTx(m, 10, 'abdiel', 'expense', 22.99, 'AUD', 'cat_suscripciones', 'acc_abdiel_revolut', 'Netflix & Spotify');
-    pushTx(m, 12, 'lara', 'expense', 55.0, 'AUD', 'cat_suscripciones', 'acc_lara_revolut', 'Gimnasio');
-
-    // Compras / Salud / Ocio
-    pushTx(m, 16, 'lara', 'expense', m === 1 ? 390 : 135, 'AUD', 'cat_compras', 'acc_lara_revolut', 'Artículos hogar & ropa');
-    pushTx(m, 19, 'abdiel', 'expense', 84.0, 'AUD', 'cat_salud', 'acc_abdiel_revolut', 'Farmacia Chemist Warehouse');
-    pushTx(m, 22, 'lara', 'expense', m === 2 ? 420 : 140, 'AUD', 'cat_ocio', 'acc_lara_revolut', m === 2 ? 'Escapada fin de semana' : 'Cine y salidas');
-
-    // Dividendos Moomoo trimestrales
+    push(m, 1, A, 'income', 4200, 'AUD', 'cat_sueldo', 'acc_a_sueldo', 'Sueldo mensual');
+    push(m, 1, B, 'income', 3800, 'AUD', 'cat_sueldo', 'acc_b_sueldo', 'Sueldo mensual');
+    push(m, 2, A, 'transfer', 500, 'AUD', 'cat_transfer', 'acc_a_sueldo', 'Aporte a fondo de ahorro', 'acc_a_ahorro');
+    push(m, 2, B, 'transfer', 400, 'AUD', 'cat_transfer', 'acc_b_sueldo', 'Aporte a fondo de ahorro', 'acc_b_ahorro');
+    push(m, 2, A, 'transfer', 600, 'AUD', 'cat_transfer', 'acc_a_sueldo', 'Fondos para gastos diarios', 'acc_a_diario');
+    push(m, 28, A, 'income', 45 + (5 - m) * 2, 'AUD', 'cat_intereses', 'acc_a_ahorro', 'Interés de la cuenta de ahorro');
+    push(m, 28, B, 'income', 34 + (5 - m) * 2, 'AUD', 'cat_intereses', 'acc_b_ahorro', 'Interés de la cuenta de ahorro');
+    push(m, 3, A, 'expense', 1000, 'AUD', 'cat_vivienda', 'acc_a_sueldo', 'Alquiler (50%)');
+    push(m, 3, B, 'expense', 1000, 'AUD', 'cat_vivienda', 'acc_b_sueldo', 'Alquiler (50%)');
+    push(m, 7, A, 'expense', 130 + (m % 2) * 20, 'AUD', 'cat_servicios', 'acc_a_sueldo', 'Electricidad y gas');
+    push(m, 9, B, 'expense', 80, 'AUD', 'cat_servicios', 'acc_b_sueldo', 'Internet');
+    push(m, 4, A, 'expense', 160 + m * 5, 'AUD', 'cat_supermercado', 'acc_a_diario', 'Supermercado semanal');
+    push(m, 11, B, 'expense', 180 + (m % 3) * 15, 'AUD', 'cat_supermercado', 'acc_b_tarjeta', 'Supermercado y verdulería');
+    push(m, 18, A, 'expense', 190, 'AUD', 'cat_supermercado', 'acc_a_diario', 'Mercado');
+    push(m, 6, A, 'expense', 70, 'AUD', 'cat_restaurantes', 'acc_a_diario', 'Cena');
+    push(m, 14, B, 'expense', m === 0 ? 260 : 90, 'AUD', 'cat_restaurantes', 'acc_b_tarjeta', m === 0 ? 'Cena de cumpleaños' : 'Brunch');
+    push(m, 8, A, 'expense', 85, 'AUD', 'cat_transporte', 'acc_a_diario', 'Transporte público');
+    push(m, 15, B, 'expense', 100, 'AUD', 'cat_transporte', 'acc_b_tarjeta', 'Combustible');
+    push(m, 10, A, 'expense', 25, 'AUD', 'cat_suscripciones', 'acc_a_diario', 'Streaming');
+    push(m, 12, B, 'expense', 50, 'AUD', 'cat_suscripciones', 'acc_b_tarjeta', 'Gimnasio');
+    push(m, 16, B, 'expense', m === 1 ? 350 : 120, 'AUD', 'cat_compras', 'acc_b_tarjeta', 'Artículos del hogar');
+    push(m, 19, A, 'expense', 60, 'AUD', 'cat_salud', 'acc_a_diario', 'Farmacia');
+    push(m, 22, B, 'expense', m === 2 ? 400 : 110, 'AUD', 'cat_ocio', 'acc_b_tarjeta', m === 2 ? 'Escapada de fin de semana' : 'Cine y salidas');
+    push(m, 25, B, 'transfer', 600, 'AUD', 'cat_transfer', 'acc_b_sueldo', 'Pago tarjeta de crédito', 'acc_b_tarjeta');
     if (m === 0 || m === 3) {
-      pushTx(m, 15, 'abdiel', 'income', 68.5, 'USD', 'cat_dividendos', 'acc_abdiel_moomoo', 'Dividendos ETF VOO + SCHD');
-      pushTx(m, 15, 'lara', 'income', 42.0, 'AUD', 'cat_dividendos', 'acc_lara_moomoo', 'Dividendos ETF IVV');
+      push(m, 15, A, 'income', 55, 'USD', 'cat_dividendos', 'acc_a_inversion', 'Dividendos ETF');
     }
   }
-
   return list.sort((a, b) => b.date.localeCompare(a.date));
 }
 
 export const DEFAULT_FIXED_EXPENSES: FixedExpense[] = [
-  {
-    id: 'fix_1',
-    name: 'Alquiler departamento (50% Abdiel)',
-    owner: 'abdiel',
-    amount: 1200,
-    currency: 'AUD',
-    categoryId: 'cat_vivienda',
-    accountId: 'acc_abdiel_commbank',
-    dueDay: 3,
-  },
-  {
-    id: 'fix_2',
-    name: 'Alquiler departamento (50% Lara)',
-    owner: 'lara',
-    amount: 1200,
-    currency: 'AUD',
-    categoryId: 'cat_vivienda',
-    accountId: 'acc_lara_commbank',
-    dueDay: 3,
-  },
-  {
-    id: 'fix_3',
-    name: 'Electricidad y Gas AGL',
-    owner: 'abdiel',
-    amount: 145,
-    currency: 'AUD',
-    categoryId: 'cat_servicios',
-    accountId: 'acc_abdiel_commbank',
-    dueDay: 7,
-  },
-  {
-    id: 'fix_4',
-    name: 'Internet Fibra Hogar',
-    owner: 'lara',
-    amount: 89,
-    currency: 'AUD',
-    categoryId: 'cat_servicios',
-    accountId: 'acc_lara_commbank',
-    dueDay: 9,
-  },
-  {
-    id: 'fix_5',
-    name: 'Netflix & Spotify',
-    owner: 'abdiel',
-    amount: 22.99,
-    currency: 'AUD',
-    categoryId: 'cat_suscripciones',
-    accountId: 'acc_abdiel_revolut',
-    dueDay: 15,
-  },
-  {
-    id: 'fix_6',
-    name: 'Gimnasio mensual',
-    owner: 'lara',
-    amount: 55,
-    currency: 'AUD',
-    categoryId: 'cat_suscripciones',
-    accountId: 'acc_lara_revolut',
-    dueDay: 18,
-  },
+  { id: 'fix_1', name: 'Alquiler (50%)', owner: A, amount: 1000, currency: 'AUD', categoryId: 'cat_vivienda', accountId: 'acc_a_sueldo', dueDay: 3 },
+  { id: 'fix_2', name: 'Alquiler (50%)', owner: B, amount: 1000, currency: 'AUD', categoryId: 'cat_vivienda', accountId: 'acc_b_sueldo', dueDay: 3 },
+  { id: 'fix_3', name: 'Electricidad y gas', owner: A, amount: 130, currency: 'AUD', categoryId: 'cat_servicios', accountId: 'acc_a_sueldo', dueDay: 7 },
+  { id: 'fix_4', name: 'Internet', owner: B, amount: 80, currency: 'AUD', categoryId: 'cat_servicios', accountId: 'acc_b_sueldo', dueDay: 9 },
+  { id: 'fix_5', name: 'Streaming', owner: A, amount: 25, currency: 'AUD', categoryId: 'cat_suscripciones', accountId: 'acc_a_diario', dueDay: 10 },
+  { id: 'fix_6', name: 'Gimnasio', owner: B, amount: 50, currency: 'AUD', categoryId: 'cat_suscripciones', accountId: 'acc_b_tarjeta', dueDay: 12 },
 ];
 
 function getSamplePaidMap(): Record<string, Record<string, boolean>> {
   const now = new Date();
   const mk = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  return {
-    [mk]: {
-      fix_1: true,
-      fix_2: true,
-      fix_3: true,
-      fix_4: false,
-      fix_5: false,
-      fix_6: false,
-    },
-  };
+  return { [mk]: { fix_1: true, fix_2: true, fix_3: true, fix_4: false, fix_5: false, fix_6: false } };
 }
 
+export const DEFAULT_EXCHANGE_RATES = {
+  AUD: 1,
+  USD: 1.54,
+  EUR: 1.66,
+  ARS: 0.0012,
+  MXN: 0.083,
+  CLP: 0.0016,
+};
+
+/**
+ * withSamples = true → example household to explore the app.
+ * withSamples = false → empty structure (keeps default categories and budgets only).
+ */
 export function createInitialFinanceState(withSamples = true): FinanceState {
   return {
-    version: 1,
+    version: CURRENT_DATA_VERSION,
     displayCurrency: 'AUD',
-    exchangeRates: {
-      AUD: 1,
-      USD: 1.54,
-      EUR: 1.66,
-      ARS: 0.0015,
-      MXN: 0.077,
-      CLP: 0.0016,
-    },
+    exchangeRates: { ...DEFAULT_EXCHANGE_RATES },
+    exchangeRatesUpdatedAt: undefined,
     profiles: DEFAULT_PROFILES,
-    accounts: DEFAULT_ACCOUNTS,
+    accounts: withSamples ? DEFAULT_ACCOUNTS : [],
     categories: DEFAULT_CATEGORIES,
     transactions: withSamples ? buildSampleTransactions() : [],
     budgets: DEFAULT_BUDGETS,
-    goalSavers: DEFAULT_GOALSAVERS,
-    moomooHoldings: withSamples ? DEFAULT_MOOMOO_HOLDINGS : [],
+    savingsConfigs: withSamples ? DEFAULT_SAVINGS_CONFIGS : [],
+    investments: withSamples ? DEFAULT_INVESTMENTS : [],
     fixedExpenses: withSamples ? DEFAULT_FIXED_EXPENSES : [],
     fixedExpensePaidByMonth: withSamples ? getSamplePaidMap() : {},
+    lastBackupAt: undefined,
     isSampleData: withSamples,
   };
 }

@@ -40,7 +40,7 @@ const EMPTY_FORM: ProfileFormState = {
   role: '',
   email: '',
   phone: '',
-  country: 'Australia',
+  country: '',
   notes: '',
   color: PROFILE_COLOR_PALETTE[2],
 };
@@ -468,7 +468,7 @@ export function ProfilesModal({
                     type="text"
                     value={form.country}
                     onChange={(e) => setForm((f) => ({ ...f, country: e.target.value }))}
-                    placeholder="Australia"
+                    placeholder="País"
                     className="w-full px-3 py-2 bg-white dark:bg-[#031725] border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg text-sm text-[#031725] dark:text-[#DAEAFF]"
                   />
                 </div>

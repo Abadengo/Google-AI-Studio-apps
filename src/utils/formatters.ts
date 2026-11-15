@@ -1,7 +1,8 @@
 import type {
   CurrencyCode,
   ExchangeRates,
-  GoalSaverProfile,
+  AccountKind,
+  SavingsInterestConfig,
   ProfileId,
   TransactionType,
   UserProfile,
@@ -118,7 +119,7 @@ export function getCurrentMonthKey(): string {
   return getTodayISO().slice(0, 7);
 }
 
-export interface GoalSaverMonthPoint {
+export interface SavingsMonthPoint {
   month: number;
   label: string;
   startingBalance: number;
@@ -129,7 +130,7 @@ export interface GoalSaverMonthPoint {
   totalInterest: number;
 }
 
-export function simulateGoalSaver(params: {
+export function simulateSavingsInterest(params: {
   initialBalance: number;
   monthlyContribution: number;
   baseRateAnnual: number;
@@ -137,7 +138,7 @@ export function simulateGoalSaver(params: {
   months: number;
   includeBonus: boolean;
   lang?: 'es' | 'en';
-}): GoalSaverMonthPoint[] {
+}): SavingsMonthPoint[] {
   const {
     initialBalance,
     monthlyContribution,
@@ -156,7 +157,7 @@ export function simulateGoalSaver(params: {
   let totalContributed = initialBalance;
   let totalInterest = 0;
 
-  const points: GoalSaverMonthPoint[] = [];
+  const points: SavingsMonthPoint[] = [];
 
   for (let i = 1; i <= months; i++) {
     const startingBalance = balance;
@@ -355,7 +356,7 @@ export function simulateDividendCapitalGrowth(params: {
   return points;
 }
 
-export interface MoomooProjectionYearPoint {
+export interface InvestmentProjectionYearPoint {
   year: number;
   label: string;
   totalContributed: number;
@@ -365,7 +366,7 @@ export interface MoomooProjectionYearPoint {
   annualDividendIncome: number;
 }
 
-export function simulateMoomooGrowth(params: {
+export function simulateInvestmentGrowth(params: {
   initialCapital: number;
   monthlyContribution: number;
   annualPriceGrowthPct: number;
@@ -373,7 +374,7 @@ export function simulateMoomooGrowth(params: {
   reinvestDividends: boolean;
   years: number;
   lang?: 'es' | 'en';
-}): MoomooProjectionYearPoint[] {
+}): InvestmentProjectionYearPoint[] {
   const {
     initialCapital,
     monthlyContribution,
@@ -392,7 +393,7 @@ export function simulateMoomooGrowth(params: {
   let dividendsAccumulated = 0;
   let cashDividendsOutside = 0;
 
-  const points: MoomooProjectionYearPoint[] = [];
+  const points: InvestmentProjectionYearPoint[] = [];
 
   for (let y = 1; y <= years; y++) {
     let yearDividendSum = 0;
@@ -834,30 +835,67 @@ export function getSampleCsvContent(kind: 'commbank' | 'goalsaver' | 'revolut' |
 }
 
 export function getProfileLabel(owner: ProfileId, profiles?: UserProfile[]): string {
-  const found = profiles?.find((p) => p.id === owner);
-  if (found) return found.name;
-  if (owner === 'abdiel') return 'Abdiel';
-  if (owner === 'lara') return 'Lara';
-  return owner;
+  return profiles?.find((p) => p.id === owner)?.name || owner;
 }
 
-export function getGoalSaverForProfile(
-  goalSavers: Record<string, GoalSaverProfile>,
-  profile: Pick<UserProfile, 'id' | 'name'>
-): GoalSaverProfile {
-  return (
-    goalSavers[profile.id] || {
-      owner: profile.id,
-      accountName: `CommBank GoalSaver · ${profile.name}`,
-      currentBalance: 0,
-      monthlyContribution: 500,
-      baseRateAnnual: 0.45,
-      bonusRateAnnual: 4.45,
-      currency: 'AUD',
-    }
-  );
+export const ACCOUNT_KIND_LABELS: Record<AccountKind, { es: string; en: string }> = {
+  transaccional: { es: 'Transaccional (débito)', en: 'Checking (debit)' },
+  ahorro: { es: 'Ahorro', en: 'Savings' },
+  inversion: { es: 'Inversión', en: 'Investment' },
+  tarjeta_credito: { es: 'Tarjeta de crédito', en: 'Credit card' },
+  efectivo: { es: 'Efectivo', en: 'Cash' },
+  otra: { es: 'Otra', en: 'Other' },
+};
+
+export function accountKindLabel(kind: AccountKind, lang: 'es' | 'en' = 'es'): string {
+  return (ACCOUNT_KIND_LABELS[kind] || ACCOUNT_KIND_LABELS.otra)[lang];
 }
 
+/** Label for an account in selects: "Name · Institution (CUR)". */
+export function accountDisplayName(acc: { name: string; institution?: string; currency?: string }): string {
+  const inst = acc.institution && !acc.name.toLowerCase().includes(acc.institution.toLowerCase()) ? ` · ${acc.institution}` : '';
+  return `${acc.name}${inst}${acc.currency ? ` (${acc.currency})` : ''}`;
+}
+
+/**
+ * Statement FILE formats the importer can recognise. These describe how a file is laid out,
+ * not what kind of account it belongs to.
+ */
+export const FILE_FORMAT_LABELS: Record<Exclude<CsvPreset, 'auto'>, { es: string; en: string }> = {
+  commbank: { es: 'CommBank (cuenta)', en: 'CommBank (account)' },
+  goalsaver: { es: 'CommBank (ahorro)', en: 'CommBank (savings)' },
+  revolut: { es: 'Revolut', en: 'Revolut' },
+  moomoo: { es: 'Moomoo (broker)', en: 'Moomoo (broker)' },
+  generic: { es: 'Genérico', en: 'Generic' },
+};
+
+export function fileFormatLabel(preset: CsvPreset, lang: 'es' | 'en' = 'es'): string {
+  if (preset === 'auto') return lang === 'en' ? 'Auto-detect' : 'Detectar automáticamente';
+  return FILE_FORMAT_LABELS[preset][lang];
+}
+
+/** Account kind that usually matches a detected file format (only a suggestion). */
+export function suggestedKindForFormat(preset: CsvPreset): AccountKind {
+  if (preset === 'goalsaver') return 'ahorro';
+  if (preset === 'moomoo') return 'inversion';
+  if (preset === 'commbank' || preset === 'revolut') return 'transaccional';
+  return 'otra';
+}
+
+/** Balance used for a savings-interest projection. */
+export function getSavingsBalance(
+  cfg: SavingsInterestConfig,
+  accountBalances: Map<string, number>,
+  accounts: Array<{ id: string; currency: CurrencyCode }>,
+  rates: ExchangeRates
+): number {
+  if (cfg.useAccountBalance && cfg.accountId) {
+    const acc = accounts.find((a) => a.id === cfg.accountId);
+    const bal = accountBalances.get(cfg.accountId);
+    if (acc && bal !== undefined) return convertCurrency(bal, acc.currency, cfg.currency, rates);
+  }
+  return cfg.currentBalance;
+}
 /**
  * Live balance of every account = initial balance + income − expenses ± transfers,
  * converting each movement into the account's own currency.
@@ -911,3 +949,4 @@ export function downloadBlob(blob: Blob, fileName: string) {
     URL.revokeObjectURL(url);
   }, 1500);
 }
+

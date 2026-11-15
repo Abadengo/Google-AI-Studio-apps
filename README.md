@@ -26,6 +26,15 @@ Importa movimientos desde **PDF, CSV e imágenes (JPG/PNG/WEBP)**.
    GEMINI_API_KEY="tu_api_key"
    ```
 
+   Si vas a publicarla (Cloud Run u otro servidor), agrega también una contraseña para la IA:
+
+   ```
+   APP_PASSWORD="una-contraseña-larga"
+   ```
+
+   La app la pide una sola vez y la guarda en el navegador. Sin `APP_PASSWORD`, en modo producción
+   (`npm start`) las funciones de IA quedan desactivadas para que nadie gaste tu clave.
+
 3. Arranca la app:
 
    ```bash
@@ -50,9 +59,13 @@ Todo se guarda **solo en tu navegador** (localStorage), no en un servidor ni en 
 En la app: botón **"Respaldo y Moneda"** (barra superior) o el enlace del pie de página.
 
 - **Descargar respaldo (.json)**: copia completa (perfiles, cuentas, movimientos, presupuestos,
-  GoalSaver, inversiones, tipos de cambio). Es el archivo que sirve para restaurar.
+  fondos de ahorro, inversiones, tipos de cambio). Es el archivo que sirve para restaurar.
 - **Exportar movimientos (.csv)**: para Excel / Google Sheets (no sirve para restaurar).
 - **Restaurar desde .json**: reemplaza todos los datos actuales por los del archivo (pide confirmación).
+
+La app muestra un **recordatorio** si pasaron más de 7 días desde el último respaldo `.json`
+(y guarda la fecha del último). Los respaldos de versiones anteriores se pueden restaurar: se convierten
+automáticamente al formato actual.
 
 Recomendaciones:
 
@@ -63,14 +76,31 @@ Recomendaciones:
    "Restaurar" allá.
 4. Antes de "Volver a $0", "Empezar con datos en blanco" o borrar el historial del navegador, respalda.
 
+## Cuentas, ahorro e inversiones
+
+- Cada cuenta tiene un **tipo genérico** (transaccional, ahorro, inversión, tarjeta de crédito, efectivo, otra)
+  y, si quieres, una **institución** (texto libre, solo informativo).
+- **Cuentas de ahorro con interés**: en *Cuentas Bancarias* asocia un fondo a cualquier cuenta de tipo
+  *Ahorro* con su tasa base y su tasa bonificada (se aplica solo si aportas cada mes).
+- **Inversiones**: cada posición puede asociarse a una cuenta de tipo *Inversión*.
+- Al importar, la app indica el **formato de archivo detectado** (por ejemplo, el de tu banco o broker)
+  y tú eliges o creas la cuenta destino.
+
+## Estructura de datos y migraciones
+
+Los datos se guardan en `localStorage` con la clave `finanzas_hogar_abdiel_lara_v1` (no se cambia nunca).
+El estado lleva un campo `version`; cuando la estructura cambia, `src/data/migrations.ts` convierte los
+datos viejos al cargarlos (y también al restaurar un respaldo). Antes de migrar se guarda una copia intacta
+en `finanzas_hogar_abdiel_lara_v1_pre_v2_backup`.
+
 ## Proyecciones y datos de mercado
 
 - **Inversiones → "Precios reales del mercado"**: actualiza precio actual, rendimiento por dividendo
   (últimos 12 meses) y calcula el crecimiento histórico del precio (hasta 10 años) de tus posiciones,
   que se usa como supuesto en las proyecciones. Fuente: Yahoo Finance. Acciones/ETF de la ASX se
   buscan con sufijo `.AX` cuando la posición está en AUD (p. ej. `VAS` → `VAS.AX`).
-- **Cuentas Bancarias**: proyección GoalSaver con la tasa base + bonus de cada perfil
-  (el bonus solo se aplica si ese perfil aporta cada mes).
+- **Cuentas Bancarias**: proyección de cada fondo de ahorro con su tasa base + bonificada
+  (la bonificada solo se aplica si ese fondo recibe aportes cada mes).
 - **Respaldo y Moneda → "Actualizar con tipos de cambio reales"**: tipos de cambio en vivo.
 
 Las proyecciones usan rendimientos pasados como referencia; no garantizan resultados futuros.

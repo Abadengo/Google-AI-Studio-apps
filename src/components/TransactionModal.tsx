@@ -38,7 +38,7 @@ export function TransactionModal({
   onAddCategory,
 }: TransactionModalProps) {
   const { tr, catName, lang } = useUiPreferences();
-  const fallbackOwner: ProfileId = profiles[0]?.id || 'abdiel';
+  const fallbackOwner: ProfileId = profiles[0]?.id || '';
   const defaultOwner: ProfileId =
     activeProfile !== 'all' && profiles.some((p) => p.id === activeProfile)
       ? activeProfile
@@ -83,18 +83,21 @@ export function TransactionModal({
       const initialOwner: ProfileId =
         activeProfile !== 'all' && profiles.some((p) => p.id === activeProfile)
           ? activeProfile
-          : profiles[0]?.id || 'abdiel';
+          : profiles[0]?.id || '';
       setOwner(initialOwner);
       setType('expense');
       setDate(getTodayISO());
       setAmount('');
       const ownerAccounts = accounts.filter((a) => a.owner === initialOwner);
-      const preferredRevolut =
-        ownerAccounts.find((a) => a.kind === 'revolut') || ownerAccounts[0] || accounts[0];
-      setAccountId(preferredRevolut?.id || '');
-      setCurrency(preferredRevolut?.currency || 'AUD');
-      const goalSaver = ownerAccounts.find((a) => a.kind === 'goalsaver');
-      setToAccountId(goalSaver?.id || '');
+      const preferredSpending =
+        ownerAccounts.find((a) => a.kind === 'transaccional') ||
+        ownerAccounts.find((a) => a.kind === 'tarjeta_credito') ||
+        ownerAccounts[0] ||
+        accounts[0];
+      setAccountId(preferredSpending?.id || '');
+      setCurrency(preferredSpending?.currency || 'AUD');
+      const savingsAcc = ownerAccounts.find((a) => a.kind === 'ahorro');
+      setToAccountId(savingsAcc?.id || '');
       setCategoryId('cat_supermercado');
       setDescription('');
     }
@@ -111,11 +114,11 @@ export function TransactionModal({
     if (nextOwnerAccs.length > 0) {
       const preferred =
         type === 'income'
-          ? nextOwnerAccs.find((a) => a.kind === 'commbank') || nextOwnerAccs[0]
-          : nextOwnerAccs.find((a) => a.kind === 'revolut') || nextOwnerAccs[0];
+          ? nextOwnerAccs.find((a) => a.kind === 'transaccional') || nextOwnerAccs[0]
+          : nextOwnerAccs.find((a) => a.kind === 'transaccional') || nextOwnerAccs[0];
       setAccountId(preferred.id);
       setCurrency(preferred.currency);
-      const gs = nextOwnerAccs.find((a) => a.kind === 'goalsaver');
+      const gs = nextOwnerAccs.find((a) => a.kind === 'ahorro');
       if (gs) setToAccountId(gs.id);
     }
   };
@@ -123,22 +126,22 @@ export function TransactionModal({
   const handleTypeChange = (nextType: TransactionType) => {
     setType(nextType);
     if (nextType === 'income') {
-      const comm = availableAccounts.find((a) => a.kind === 'commbank');
+      const comm = availableAccounts.find((a) => a.kind === 'transaccional');
       if (comm) {
         setAccountId(comm.id);
         setCurrency(comm.currency);
       }
       setCategoryId('cat_sueldo');
     } else if (nextType === 'expense') {
-      const rev = availableAccounts.find((a) => a.kind === 'revolut');
+      const rev = availableAccounts.find((a) => a.kind === 'transaccional');
       if (rev) {
         setAccountId(rev.id);
         setCurrency(rev.currency);
       }
       setCategoryId('cat_supermercado');
     } else {
-      const comm = availableAccounts.find((a) => a.kind === 'commbank');
-      const gs = availableAccounts.find((a) => a.kind === 'goalsaver');
+      const comm = availableAccounts.find((a) => a.kind === 'transaccional');
+      const gs = availableAccounts.find((a) => a.kind === 'ahorro');
       if (comm) {
         setAccountId(comm.id);
         setCurrency(comm.currency);
@@ -370,8 +373,8 @@ export function TransactionModal({
                     }
                   }}
                   placeholder={tr(
-                    'Ej. Ayer gasté 68.50 AUD en Coles con la Revolut de Lara',
-                    'e.g. Yesterday spent 68.50 AUD at Coles on Lara Revolut'
+                    'Ej. Ayer gasté 68.50 en el supermercado con la tarjeta de débito',
+                    'e.g. Yesterday I spent 68.50 at the supermarket with my debit card'
                   )}
                   className="flex-1 px-3 py-1.5 bg-white dark:bg-[#031725] border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg text-xs text-[#031725] dark:text-[#DAEAFF] placeholder:text-[#7FA6D6] focus:outline-none focus:ring-2 focus:ring-[#499BED]"
                 />
@@ -423,8 +426,8 @@ export function TransactionModal({
             {type === 'transfer' && (
               <p className="mt-1.5 text-xs text-[#5A7694] dark:text-[#A1C6F6]">
                 {tr(
-                  'Mover dinero entre tus cuentas (ej. de CommBank a Revolut o GoalSaver) no se suma como gasto ni ingreso.',
-                  'Moving money between your own accounts (e.g. CommBank to Revolut or GoalSaver) is excluded from income and expenses.'
+                  'Mover dinero entre tus cuentas (ej. de la cuenta sueldo al fondo de ahorro) no se suma como gasto ni ingreso.',
+                  'Moving money between your own accounts (e.g. salary account to savings fund) is excluded from income and expenses.'
                 )}
               </p>
             )}
@@ -634,7 +637,7 @@ export function TransactionModal({
               placeholder={
                 type === 'income'
                   ? tr('Ej. Sueldo quincenal, Dividendos VOO...', 'e.g. Fortnightly salary, VOO dividends...')
-                  : tr('Ej. Compra semanal Woolworths, Café...', 'e.g. Woolworths groceries, Coffee...')
+                  : tr('Ej. Compra semanal del supermercado, Café...', 'e.g. Weekly groceries, Coffee...')
               }
               value={description}
               onChange={(e) => setDescription(e.target.value)}

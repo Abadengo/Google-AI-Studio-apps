@@ -22,7 +22,7 @@ interface TransactionsViewProps {
   onOpenAiReclassify?: () => void;
   onResetToZero?: (options: {
     accounts: boolean;
-    moomoo: boolean;
+    investments: boolean;
     transactions: boolean;
     scope?: ProfileFilter;
   }) => void;
@@ -167,7 +167,7 @@ export function TransactionsView({
               onClick={() => {
                 onResetToZero({
                   accounts: false,
-                  moomoo: false,
+                  investments: false,
                   transactions: true,
                   scope: activeProfile,
                 });
@@ -182,7 +182,7 @@ export function TransactionsView({
               onClick={() => {
                 onResetToZero({
                   accounts: true,
-                  moomoo: true,
+                  investments: true,
                   transactions: true,
                   scope: activeProfile,
                 });

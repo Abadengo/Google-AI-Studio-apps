@@ -29,11 +29,14 @@ import {
   formatFullMonthLabel,
   formatMoney,
   formatMonthLabel,
-  getGoalSaverForProfile,
+  accountKindLabel,
+  computeAccountBalances,
+  getSavingsBalance,
   getLastNMonths,
   getMonthKey,
   getProfileLabel,
 } from '../utils/formatters';
+import { ACCOUNT_KINDS } from '../data/migrations';
 import { CategoryPieChart, SixMonthBarChart, type CategorySlice, type MonthlyBarPoint } from './Charts';
 import {
   SavingsGrowthLineChart,
@@ -48,7 +51,7 @@ interface DashboardViewProps {
   onSelectMonth: (month: string) => void;
   onOpenNewTransaction: () => void;
   onEditTransaction: (tx: Transaction) => void;
-  onNavigateTab: (tab: 'transactions' | 'budgets' | 'accounts' | 'moomoo') => void;
+  onNavigateTab: (tab: 'transactions' | 'budgets' | 'accounts' | 'investments') => void;
   onToggleFixedExpensePaid: (monthKey: string, fixedExpenseId: string) => void;
   onAddFixedExpense: (item: Omit<FixedExpense, 'id'>) => void;
   onDeleteFixedExpense: (id: string) => void;
@@ -58,15 +61,6 @@ interface DashboardViewProps {
   onAskAi?: (prompt?: string) => void;
 }
 
-const ACCOUNT_KIND_LABELS: Record<AccountKind, { es: string; en: string }> = {
-  commbank: { es: 'CommBank', en: 'CommBank' },
-  goalsaver: { es: 'GoalSaver', en: 'GoalSaver' },
-  revolut: { es: 'Revolut', en: 'Revolut' },
-  wise: { es: 'Wise', en: 'Wise' },
-  moomoo: { es: 'Moomoo', en: 'Moomoo' },
-  cash: { es: 'Efectivo', en: 'Cash' },
-  other: { es: 'Banco externo', en: 'External bank' },
-};
 
 export function DashboardView({
   state,
@@ -88,10 +82,10 @@ export function DashboardView({
 
   const defaultOwnerId: ProfileId =
     activeProfile === 'all'
-      ? state.profiles[0]?.id || 'abdiel'
+      ? state.profiles[0]?.id || ''
       : state.profiles.some((p) => p.id === activeProfile)
       ? activeProfile
-      : state.profiles[0]?.id || 'abdiel';
+      : state.profiles[0]?.id || '';
 
   // View mode: Totals vs By Account
   const [viewMode, setViewMode] = useState<'totals' | 'by_account'>('totals');
@@ -101,7 +95,7 @@ export function DashboardView({
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [newAccName, setNewAccName] = useState('');
   const [newAccOwner, setNewAccOwner] = useState<ProfileId>(defaultOwnerId);
-  const [newAccKind, setNewAccKind] = useState<AccountKind>('other');
+  const [newAccKind, setNewAccKind] = useState<AccountKind>('transaccional');
   const [newAccCurrency, setNewAccCurrency] = useState<CurrencyCode>(state.displayCurrency);
   const [newAccBalance, setNewAccBalance] = useState('0');
   const [confirmDeleteAccId, setConfirmDeleteAccId] = useState<string | null>(null);
@@ -347,7 +341,7 @@ export function DashboardView({
     selectedAccountId,
   ]);
 
-  // Line chart data (Recharts): Progreso histórico de ahorro acumulado y crecimiento GoalSaver por perfil
+  // Line chart data (Recharts): Progreso histórico de ahorro acumulado y crecimiento de los fondos de ahorro por perfil
   const savingsGrowthData: SavingsGrowthPoint[] = useMemo(() => {
     const monthKeys = getLastNMonths(selectedMonth, 6);
 
@@ -357,7 +351,7 @@ export function DashboardView({
 
     for (const profile of state.profiles) {
       const gsAccounts = state.accounts.filter(
-        (a) => a.owner === profile.id && a.kind === 'goalsaver'
+        (a) => a.owner === profile.id && a.kind === 'ahorro'
       );
       const idSet = new Set(gsAccounts.map((a) => a.id));
       gsIdsByProfile.set(profile.id, idSet);
@@ -407,26 +401,22 @@ export function DashboardView({
         }
       }
 
-      const goalSaverByProfile: Record<string, number> = {};
+      const savingsByProfile: Record<string, number> = {};
       for (const p of state.profiles) {
         const hasTx = hasGsTxByProfile.get(p.id);
-        const gsProfile = getGoalSaverForProfile(state.goalSavers, p);
-        const val = hasTx
-          ? (gsInitialByProfile.get(p.id) || 0) + (deltaByProfile[p.id] || 0)
-          : convertCurrency(
-              gsProfile.currentBalance,
-              gsProfile.currency,
-              currency,
-              state.exchangeRates
-            );
-        goalSaverByProfile[p.id] = Math.max(0, val);
+        // Without movements in savings accounts, fall back to the balances typed in the savings settings.
+        const manualSavings = state.savingsConfigs
+          .filter((c) => c.owner === p.id)
+          .reduce((sum, c) => sum + convertCurrency(c.currentBalance, c.currency, currency, state.exchangeRates), 0);
+        const val = hasTx ? (gsInitialByProfile.get(p.id) || 0) + (deltaByProfile[p.id] || 0) : manualSavings;
+        savingsByProfile[p.id] = Math.max(0, val);
       }
 
       return {
         monthKey: mk,
         label: formatMonthLabel(mk, lang),
         ahorroAcumulado: cumulativeSavings,
-        goalSaverByProfile,
+        savingsByProfile,
       };
     });
   }, [
@@ -434,7 +424,7 @@ export function DashboardView({
     state.profiles,
     state.accounts,
     state.transactions,
-    state.goalSavers,
+    state.savingsConfigs,
     selectedMonth,
     currency,
     state.exchangeRates,
@@ -490,24 +480,29 @@ export function DashboardView({
     tr,
   ]);
 
-  // Quick GoalSaver + Moomoo Summary
-  const goalSaverTotal = useMemo(() => {
-    const targetProfiles =
-      activeProfile === 'all'
-        ? state.profiles
-        : state.profiles.filter((p) => p.id === activeProfile);
+  // Quick savings + investments summary
+  const savingsTotal = useMemo(() => {
+    const balances = computeAccountBalances(state.accounts, state.transactions, state.exchangeRates);
+    return state.savingsConfigs
+      .filter((c) => activeProfile === 'all' || c.owner === activeProfile)
+      .reduce<number>(
+        (acc, c) =>
+          acc +
+          convertCurrency(
+            getSavingsBalance(c, balances, state.accounts, state.exchangeRates),
+            c.currency,
+            currency,
+            state.exchangeRates
+          ),
+        0
+      );
+  }, [state.savingsConfigs, state.accounts, state.transactions, activeProfile, currency, state.exchangeRates]);
 
-    return targetProfiles.reduce<number>((acc, profile) => {
-      const gs = getGoalSaverForProfile(state.goalSavers, profile);
-      return acc + convertCurrency(gs.currentBalance, gs.currency, currency, state.exchangeRates);
-    }, 0);
-  }, [state.goalSavers, state.profiles, activeProfile, currency, state.exchangeRates]);
-
-  const moomooSummary = useMemo(() => {
+  const investmentSummary = useMemo(() => {
     const holdings =
       activeProfile === 'all'
-        ? state.moomooHoldings
-        : state.moomooHoldings.filter((h) => h.owner === activeProfile);
+        ? state.investments
+        : state.investments.filter((h) => h.owner === activeProfile);
 
     let invested = 0;
     let current = 0;
@@ -521,7 +516,7 @@ export function DashboardView({
       );
     }
     return { invested, current, gain: current - invested };
-  }, [state.moomooHoldings, activeProfile, currency, state.exchangeRates]);
+  }, [state.investments, activeProfile, currency, state.exchangeRates]);
 
   const recentTransactions = monthTransactions.slice(0, 6);
 
@@ -764,7 +759,7 @@ export function DashboardView({
                 <input
                   type="text"
                   required
-                  placeholder={tr('Ej. ING Savings, Wise USD...', 'e.g. ING Savings, Wise USD...')}
+                  placeholder={tr('Ej. Cuenta en USD, Ahorro viajes...', 'e.g. USD account, Travel savings...')}
                   value={newAccName}
                   onChange={(e) => setNewAccName(e.target.value)}
                   className="w-full px-3 py-2 bg-white dark:bg-[#031725] border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg text-sm text-[#031725] dark:text-[#DAEAFF]"
@@ -795,12 +790,11 @@ export function DashboardView({
                   onChange={(e) => setNewAccKind(e.target.value as AccountKind)}
                   className="w-full px-2.5 py-2 bg-white dark:bg-[#031725] border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg text-sm text-[#031725] dark:text-[#DAEAFF]"
                 >
-                  <option value="commbank">CommBank</option>
-                  <option value="goalsaver">GoalSaver</option>
-                  <option value="revolut">Revolut</option>
-                  <option value="wise">Wise</option>
-                  <option value="moomoo">Moomoo</option>
-                  <option value="cash">{tr('Efectivo', 'Cash')}</option>
+                  {ACCOUNT_KINDS.filter((k) => k !== 'otra').map((k) => (
+                    <option key={k} value={k}>
+                      {accountKindLabel(k, lang)}
+                    </option>
+                  ))}
                   <option value="other">{tr('Otro banco', 'Other bank')}</option>
                 </select>
               </div>
@@ -891,10 +885,7 @@ export function DashboardView({
                 };
                 const isSelected = selectedAccountId === acc.id;
                 const netMonth = stats.monthIncome - stats.monthExpenses;
-                const kindLabel =
-                  lang === 'en'
-                    ? ACCOUNT_KIND_LABELS[acc.kind].en
-                    : ACCOUNT_KIND_LABELS[acc.kind].es;
+                const kindLabel = `${accountKindLabel(acc.kind, lang)}${acc.institution ? ` · ${acc.institution}` : ''}`;
                 const isConfirmingDelete = confirmDeleteAccId === acc.id;
 
                 return (
@@ -1237,20 +1228,20 @@ export function DashboardView({
         </section>
       </div>
 
-      {/* Line Chart (Recharts): Progreso histórico de ahorro acumulado y crecimiento GoalSaver */}
+      {/* Line Chart (Recharts): ahorro acumulado y fondos de ahorro */}
       <section className="bg-white dark:bg-[#062035] border border-[#D3E3FA] dark:border-[#123B66] rounded-xl p-6 space-y-4 shadow-xs">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="text-base font-semibold text-[#031725] dark:text-[#DAEAFF]">
               {tr(
-                'Progreso histórico de ahorro acumulado y GoalSaver',
-                'Historical Cumulative Savings & GoalSaver Growth'
+                'Progreso histórico de ahorro acumulado y fondos de ahorro',
+                'Historical cumulative savings & savings funds'
               )}
             </h2>
             <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6] mt-0.5">
               {tr(
-                `Evolución del ahorro neto acumulado frente al crecimiento del capital en GoalSaver (${householdNames}) en ${currency}.`,
-                `Cumulative net savings compared with GoalSaver capital growth (${householdNames}) in ${currency}.`
+                `Evolución del ahorro neto acumulado frente al saldo de las cuentas de ahorro (${householdNames}) en ${currency}.`,
+                `Cumulative net savings compared with savings account balances (${householdNames}) in ${currency}.`
               )}
             </p>
           </div>
@@ -1266,7 +1257,7 @@ export function DashboardView({
                     : 'text-[#355170] dark:text-[#A1C6F6] hover:text-[#031725] dark:hover:text-[#DAEAFF]'
                 }`}
               >
-                {tr('Ahorro + GoalSaver', 'Savings + GoalSaver')}
+                {tr('Ahorro neto + fondos', 'Net savings + funds')}
               </button>
               <button
                 type="button"
@@ -1277,7 +1268,7 @@ export function DashboardView({
                     : 'text-[#355170] dark:text-[#A1C6F6] hover:text-[#031725] dark:hover:text-[#DAEAFF]'
                 }`}
               >
-                {tr('Solo GoalSaver', 'GoalSaver Only')}
+                {tr('Solo fondos de ahorro', 'Savings funds only')}
               </button>
             </div>
 
@@ -1318,11 +1309,11 @@ export function DashboardView({
               )}
               {visibleProfiles.map((p) => {
                 const lastPoint = savingsGrowthData[savingsGrowthData.length - 1];
-                const gsAmount = lastPoint.goalSaverByProfile[p.id] || 0;
+                const gsAmount = lastPoint.savingsByProfile[p.id] || 0;
                 const badgeColor = getSafeProfileChartColor(p.color, isDark);
                 return (
                   <span key={p.id}>
-                    GoalSaver {p.name}:{' '}
+                    {tr('Ahorro', 'Savings')} {p.name}:{' '}
                     <strong style={{ color: badgeColor }}>{formatMoney(gsAmount, currency)}</strong>
                   </span>
                 );
@@ -1629,7 +1620,7 @@ export function DashboardView({
         )}
       </section>
 
-      {/* Bottom section: Recent Transactions + GoalSaver & Moomoo Snapshots */}
+      {/* Bottom section: Recent Transactions + savings & investments snapshot */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Recent transactions */}
         <section className="lg:col-span-2 bg-white dark:bg-[#062035] border border-[#D3E3FA] dark:border-[#123B66] rounded-xl overflow-hidden shadow-xs">
@@ -1742,7 +1733,7 @@ export function DashboardView({
           )}
         </section>
 
-        {/* Wealth Snapshot: GoalSaver + Moomoo */}
+        {/* Wealth Snapshot: savings + investments */}
         <section className="bg-white dark:bg-[#062035] border border-[#D3E3FA] dark:border-[#123B66] rounded-xl p-6 flex flex-col justify-between space-y-5 shadow-xs">
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -1755,10 +1746,10 @@ export function DashboardView({
             <div className="space-y-4">
               <div className="pb-4 border-b border-[#E6EFFB] dark:border-[#123B66]">
                 <div className="text-xs text-[#5A7694] dark:text-[#A1C6F6]">
-                  {tr('Colchón CommBank GoalSaver', 'CommBank GoalSaver Cushion')}
+                  {tr('Fondo de ahorro', 'Savings fund')}
                 </div>
                 <div className="text-xl font-bold text-[#031725] dark:text-[#DAEAFF] font-mono-num mt-1">
-                  {formatMoney(goalSaverTotal, currency)}
+                  {formatMoney(savingsTotal, currency)}
                 </div>
                 <button
                   type="button"
@@ -1772,27 +1763,27 @@ export function DashboardView({
 
               <div>
                 <div className="text-xs text-[#5A7694] dark:text-[#A1C6F6]">
-                  {tr('Portafolio Moomoo (Actual)', 'Moomoo Portfolio (Current)')}
+                  {tr('Portafolio de inversiones (actual)', 'Investment portfolio (current)')}
                 </div>
                 <div className="text-xl font-bold text-[#031725] dark:text-[#DAEAFF] font-mono-num mt-1">
-                  {formatMoney(moomooSummary.current, currency)}
+                  {formatMoney(investmentSummary.current, currency)}
                 </div>
                 <div className="mt-1 text-xs font-mono-num text-[#355170] dark:text-[#A1C6F6]">
-                  {tr('Invertido:', 'Invested:')} {formatMoney(moomooSummary.invested, currency)} ·{' '}
+                  {tr('Invertido:', 'Invested:')} {formatMoney(investmentSummary.invested, currency)} ·{' '}
                   <span
                     className={
-                      moomooSummary.gain >= 0
+                      investmentSummary.gain >= 0
                         ? 'text-emerald-700 dark:text-emerald-400 font-medium'
                         : 'text-red-700 dark:text-red-400 font-medium'
                     }
                   >
-                    {moomooSummary.gain >= 0 ? '+' : ''}
-                    {formatMoney(moomooSummary.gain, currency)}
+                    {investmentSummary.gain >= 0 ? '+' : ''}
+                    {formatMoney(investmentSummary.gain, currency)}
                   </span>
                 </div>
                 <button
                   type="button"
-                  onClick={() => onNavigateTab('moomoo')}
+                  onClick={() => onNavigateTab('investments')}
                   className="mt-1.5 text-xs font-medium text-[#022E5B] dark:text-[#499BED] hover:underline inline-flex items-center gap-1"
                 >
                   {tr('Ver ETFs y calculadora de dividendos', 'View ETFs & dividend calculator')}{' '}

@@ -10,11 +10,19 @@ interface BackupModalProps {
   onClose: () => void;
   state: FinanceState;
   onRestoreState: (jsonText: string) => { ok: boolean; error?: string };
+  /** Records the date of the last .json backup (drives the 7-day reminder). */
+  onBackupDownloaded: () => void;
   onClearToBlank: () => void;
   onOpenResetZero?: () => void;
   onLoadSampleData: () => void;
   onUpdateExchangeRates: (rates: ExchangeRates) => void;
   onSetDisplayCurrency: (currency: CurrencyCode) => void;
+}
+
+function formatDateTime(iso: string, lang: 'es' | 'en'): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return new Intl.DateTimeFormat(lang === 'en' ? 'en-AU' : 'es-ES', { dateStyle: 'medium', timeStyle: 'short' }).format(d);
 }
 
 /** Quote a CSV cell and neutralise spreadsheet formulas (=, +, -, @) coming from bank descriptions. */
@@ -65,6 +73,7 @@ export function BackupModal({
   onClose,
   state,
   onRestoreState,
+  onBackupDownloaded,
   onClearToBlank,
   onOpenResetZero,
   onLoadSampleData,
@@ -79,9 +88,11 @@ export function BackupModal({
   if (!isOpen) return null;
 
   const handleDownloadJsonBackup = () => {
-    const json = JSON.stringify(state, null, 2);
+    // The file records its own backup date so a restore doesn't trigger the reminder right away.
+    const json = JSON.stringify({ ...state, lastBackupAt: new Date().toISOString() }, null, 2);
     const blob = new Blob([json], { type: 'application/json;charset=utf-8;' });
     downloadBlob(blob, `midas_tracker_backup_${getTodayISO()}.json`);
+    onBackupDownloaded();
     setStatusMsg({
       type: 'ok',
       text: tr(
@@ -289,8 +300,8 @@ export function BackupModal({
             </h3>
             <p className="text-xs text-[#355170] dark:text-[#A1C6F6] leading-relaxed">
               {tr(
-                'Si limpias el historial del navegador o cambias de computadora, puedes restaurar todo tu historial, presupuestos, GoalSaver y Moomoo cargando tu último archivo de respaldo .json.',
-                'If you clear browser storage or switch devices, restore your full history, budgets, GoalSaver, and Moomoo holdings from your latest .json backup file.'
+                'Si limpias el historial del navegador o cambias de computadora, puedes restaurar todo tu historial, presupuestos, ahorro e inversiones cargando tu último archivo de respaldo .json. Los respaldos de versiones anteriores se convierten automáticamente.',
+                'If you clear browser storage or switch devices, restore your full history, budgets, savings, and investments from your latest .json backup file. Backups from older versions are converted automatically.'
               )}
             </p>
             <div className="flex flex-wrap gap-3">
@@ -323,6 +334,14 @@ export function BackupModal({
                 {tr('Exportar tabla a Excel (.csv)', 'Export table to Excel (.csv)')}
               </button>
             </div>
+            <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6]">
+              {state.lastBackupAt
+                ? tr(
+                    `Último respaldo descargado: ${formatDateTime(state.lastBackupAt, lang)}.`,
+                    `Last backup downloaded: ${formatDateTime(state.lastBackupAt, lang)}.`
+                  )
+                : tr('Todavía no descargaste ningún respaldo.', 'You have not downloaded a backup yet.')}
+            </p>
           </section>
 
           <hr className="border-[#D3E3FA] dark:border-[#123B66]" />
@@ -336,8 +355,8 @@ export function BackupModal({
                 </h3>
                 <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6]">
                   {tr(
-                    'Para sumar tus cuentas en AUD (CommBank/Revolut) y USD (Moomoo/Wise) en un solo resumen.',
-                    'Combine AUD (CommBank/Revolut) and USD (Moomoo/Wise) accounts in one consolidated summary.'
+                    'Para sumar en un solo resumen cuentas en distintas monedas (por ejemplo AUD y USD).',
+                    'Combine accounts in different currencies (e.g. AUD and USD) in one consolidated summary.'
                   )}
                 </p>
               </div>
@@ -411,6 +430,17 @@ export function BackupModal({
                 </div>
               ))}
             </div>
+            <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6]">
+              {state.exchangeRatesUpdatedAt
+                ? tr(
+                    `Tipos de cambio actualizados por última vez: ${formatDateTime(state.exchangeRatesUpdatedAt, lang)}.`,
+                    `Exchange rates last updated: ${formatDateTime(state.exchangeRatesUpdatedAt, lang)}.`
+                  )
+                : tr(
+                    'Tipos de cambio por defecto (nunca actualizados): revísalos o actualízalos con datos reales.',
+                    'Default exchange rates (never updated): review them or update them with live data.'
+                  )}
+            </p>
           </section>
 
           <hr className="border-[#D3E3FA] dark:border-[#123B66]" />
@@ -491,8 +521,8 @@ export function BackupModal({
                 >
                   <RotateCcw className="w-4 h-4" />
                   {tr(
-                    'Volver saldos (Cuentas, Moomoo, Movimientos) a $0',
-                    'Reset balances (Accounts, Moomoo, Transactions) to $0'
+                    'Volver saldos (cuentas, inversiones, movimientos) a $0',
+                    'Reset balances (accounts, investments, transactions) to $0'
                   )}
                 </button>
               )}

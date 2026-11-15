@@ -14,32 +14,33 @@ import { useUiPreferences } from '../contexts/UiPreferencesContext';
 import type {
   CurrencyCode,
   FinanceState,
-  MoomooHolding,
+  InvestmentHolding,
   ProfileFilter,
   ProfileId,
 } from '../types/finance';
 import {
   CURRENCY_META,
   convertCurrency,
+  accountDisplayName,
   formatMoney,
   getProfileLabel,
   simulateDividendCapitalGrowth,
-  simulateMoomooGrowth,
+  simulateInvestmentGrowth,
   type DividendPayoutFrequency,
 } from '../utils/formatters';
 import { fetchMarketQuotes, toYahooSymbol } from '../utils/marketData';
 import { ProjectionBarChart } from './Charts';
 import { getSafeProfileChartColor } from './SavingsGrowthLineChart';
 
-interface MoomooInvestmentsViewProps {
+interface InvestmentsViewProps {
   state: FinanceState;
   activeProfile: ProfileFilter;
-  onAddHolding: (holding: Omit<MoomooHolding, 'id'>) => void;
-  onUpdateHolding: (holding: MoomooHolding) => void;
+  onAddHolding: (holding: Omit<InvestmentHolding, 'id'>) => void;
+  onUpdateHolding: (holding: InvestmentHolding) => void;
   onDeleteHolding: (id: string) => void;
   onResetToZero?: (options: {
     accounts: boolean;
-    moomoo: boolean;
+    investments: boolean;
     transactions: boolean;
     scope?: ProfileFilter;
   }) => void;
@@ -47,7 +48,7 @@ interface MoomooInvestmentsViewProps {
   onAskAi?: (prompt?: string) => void;
 }
 
-export function MoomooInvestmentsView({
+export function InvestmentsView({
   state,
   activeProfile,
   onAddHolding,
@@ -56,17 +57,17 @@ export function MoomooInvestmentsView({
   onResetToZero,
   onOpenCsvImport,
   onAskAi,
-}: MoomooInvestmentsViewProps) {
+}: InvestmentsViewProps) {
   const { tr, lang, isDark } = useUiPreferences();
 
   const displayCurr = state.displayCurrency;
 
   const defaultOwnerId: ProfileId =
     activeProfile === 'all'
-      ? state.profiles[0]?.id || 'abdiel'
+      ? state.profiles[0]?.id || ''
       : state.profiles.some((p) => p.id === activeProfile)
       ? activeProfile
-      : state.profiles[0]?.id || 'abdiel';
+      : state.profiles[0]?.id || '';
 
   const visibleProfiles = useMemo(
     () =>
@@ -78,9 +79,9 @@ export function MoomooInvestmentsView({
 
   // Holdings filtered by profile
   const holdings = useMemo(() => {
-    if (activeProfile === 'all') return state.moomooHoldings;
-    return state.moomooHoldings.filter((h) => h.owner === activeProfile);
-  }, [state.moomooHoldings, activeProfile]);
+    if (activeProfile === 'all') return state.investments;
+    return state.investments.filter((h) => h.owner === activeProfile);
+  }, [state.investments, activeProfile]);
 
   const portfolioStats = useMemo(() => {
     let totalInvested = 0;
@@ -120,11 +121,11 @@ export function MoomooInvestmentsView({
     };
   }, [holdings, displayCurr, state.exchangeRates]);
 
-  // Dynamic per-profile Moomoo portfolio baselines for the Dividend Capital Simulator
+  // Dynamic per-profile portfolio baselines for the Dividend Capital Simulator
   const ownerPortfolioStats = useMemo(() => {
     const out: Record<string, { current: number; yieldPct: number }> = {};
     for (const p of state.profiles) {
-      const list = state.moomooHoldings.filter((h) => h.owner === p.id);
+      const list = state.investments.filter((h) => h.owner === p.id);
       let current = 0;
       let annualDiv = 0;
       for (const h of list) {
@@ -141,11 +142,11 @@ export function MoomooInvestmentsView({
       out[p.id] = { current: Math.round(current), yieldPct: Number(yieldPct.toFixed(2)) };
     }
     return out;
-  }, [state.profiles, state.moomooHoldings, displayCurr, state.exchangeRates]);
+  }, [state.profiles, state.investments, displayCurr, state.exchangeRates]);
 
   // Add/Edit holding form state
   const [showHoldingForm, setShowHoldingForm] = useState(false);
-  const [editingHolding, setEditingHolding] = useState<MoomooHolding | null>(null);
+  const [editingHolding, setEditingHolding] = useState<InvestmentHolding | null>(null);
   const [formOwner, setFormOwner] = useState<ProfileId>(defaultOwnerId);
   const [formTicker, setFormTicker] = useState('');
   const [formName, setFormName] = useState('');
@@ -155,11 +156,14 @@ export function MoomooInvestmentsView({
   const [formCurrentPrice, setFormCurrentPrice] = useState('');
   const [formDivYield, setFormDivYield] = useState('1.5');
   const [formCurrency, setFormCurrency] = useState<CurrencyCode>('USD');
+  const [formAccountId, setFormAccountId] = useState<string>('');
+  const investmentAccountsFor = (owner: ProfileId) =>
+    state.accounts.filter((a) => a.kind === 'inversion' && a.owner === owner);
 
   // Inline quick price edit
   const [quickPriceId, setQuickPriceId] = useState<string | null>(null);
   const [quickPriceVal, setQuickPriceVal] = useState<string>('');
-  const [confirmZeroMoomoo, setConfirmZeroMoomoo] = useState(false);
+  const [confirmZeroInvestments, setConfirmZeroInvestments] = useState(false);
 
   // DRIP & Growth Calculator State
   const [calcInitial, setCalcInitial] = useState<number>(() => Math.round(portfolioStats.totalCurrent));
@@ -177,7 +181,7 @@ export function MoomooInvestmentsView({
   }, [activeProfile, portfolioStats.totalCurrent, portfolioStats.weightedYield]);
 
   const projectionYears = useMemo(() => {
-    return simulateMoomooGrowth({
+    return simulateInvestmentGrowth({
       initialCapital: calcInitial,
       monthlyContribution: calcMonthly,
       annualPriceGrowthPct: calcGrowthPct,
@@ -189,7 +193,7 @@ export function MoomooInvestmentsView({
   }, [calcInitial, calcMonthly, calcGrowthPct, calcDivYieldPct, calcReinvest, calcYears, lang]);
 
   const projectionNoDrip = useMemo(() => {
-    return simulateMoomooGrowth({
+    return simulateInvestmentGrowth({
       initialCapital: calcInitial,
       monthlyContribution: calcMonthly,
       annualPriceGrowthPct: calcGrowthPct,
@@ -361,10 +365,11 @@ export function MoomooInvestmentsView({
     setFormCurrentPrice('');
     setFormDivYield('1.5');
     setFormCurrency('USD');
+    setFormAccountId(investmentAccountsFor(defaultOwnerId)[0]?.id || '');
     setShowHoldingForm(true);
   };
 
-  const openEditForm = (h: MoomooHolding) => {
+  const openEditForm = (h: InvestmentHolding) => {
     setEditingHolding(h);
     setFormOwner(h.owner);
     setFormTicker(h.ticker);
@@ -375,6 +380,7 @@ export function MoomooInvestmentsView({
     setFormCurrentPrice(String(h.currentPricePerShare));
     setFormDivYield(String(h.dividendYieldAnnual));
     setFormCurrency(h.currency);
+    setFormAccountId(h.accountId || '');
     setShowHoldingForm(true);
   };
 
@@ -385,8 +391,9 @@ export function MoomooInvestmentsView({
     const curPrice = Number(formCurrentPrice) || avgCost;
     if (!formTicker.trim() || !shares || shares <= 0 || !avgCost || avgCost <= 0) return;
 
-    const payload: Omit<MoomooHolding, 'id'> = {
+    const payload: Omit<InvestmentHolding, 'id'> = {
       owner: formOwner,
+      accountId: formAccountId && investmentAccountsFor(formOwner).some((a) => a.id === formAccountId) ? formAccountId : undefined,
       ticker: formTicker.toUpperCase().trim(),
       name: formName.trim() || formTicker.toUpperCase().trim(),
       assetType: formType,
@@ -443,8 +450,8 @@ export function MoomooInvestmentsView({
               onClick={() =>
                 onAskAi(
                   tr(
-                    'Analiza nuestro portafolio Moomoo: diversificación, rendimiento por dividendos y cómo optimizar la reinversión.',
-                    'Analyze our Moomoo portfolio: diversification, dividend yield, and how to optimize reinvestment.'
+                    'Analiza nuestro portafolio de inversiones: diversificación, rendimiento por dividendos y cómo optimizar la reinversión.',
+                    'Analyze our investment portfolio: diversification, dividend yield, and how to optimize reinvestment.'
                   )
                 )
               }
@@ -457,11 +464,11 @@ export function MoomooInvestmentsView({
           {onResetToZero && holdings.length > 0 && (
             <button
               type="button"
-              onClick={() => setConfirmZeroMoomoo((v) => !v)}
+              onClick={() => setConfirmZeroInvestments((v) => !v)}
               className="inline-flex items-center gap-2 px-3.5 py-2 bg-red-50/70 dark:bg-red-950/35 border border-red-200 dark:border-red-800/70 text-red-700 dark:text-red-300 text-sm font-medium rounded-lg hover:bg-red-100 dark:hover:bg-red-950/60 whitespace-nowrap transition-colors"
             >
               <RefreshCw className="w-4 h-4" />
-              {tr('Saldos Moomoo a $0', 'Reset Moomoo to $0')}
+              {tr('Saldos de inversiones a $0', 'Reset investments to $0')}
             </button>
           )}
           {holdings.length > 0 && (
@@ -483,7 +490,7 @@ export function MoomooInvestmentsView({
             className="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-[#022E5B]/80 border border-[#C6DAF7] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-sm font-medium rounded-lg hover:bg-[#DAEAFF]/50 dark:hover:bg-[#022E5B] whitespace-nowrap transition-colors"
           >
             <Upload className="w-4 h-4" />
-            {tr('Importar PDF / CSV Moomoo', 'Import Moomoo PDF / CSV')}
+            {tr('Importar extracto del broker', 'Import broker statement')}
           </button>
           <button
             type="button"
@@ -509,12 +516,12 @@ export function MoomooInvestmentsView({
         </div>
       )}
 
-      {confirmZeroMoomoo && onResetToZero && (
+      {confirmZeroInvestments && onResetToZero && (
         <div className="p-4 rounded-xl bg-red-50/80 dark:bg-red-950/35 border border-red-200 dark:border-red-800/70 flex flex-wrap items-center justify-between gap-3 text-xs">
           <span className="text-red-900 dark:text-red-200 font-medium">
             {tr(
-              '¿Volver a $0.00 el portafolio y los saldos en Moomoo? Se limpiarán las posiciones actuales.',
-              'Reset Moomoo portfolio and balances to $0.00? Current holdings will be cleared.'
+              '¿Volver a $0.00 el portafolio y los saldos de las cuentas de inversión? Se limpiarán las posiciones actuales.',
+              'Reset the portfolio and investment account balances to $0.00? Current holdings will be cleared.'
             )}
           </span>
           <div className="flex items-center gap-2">
@@ -523,19 +530,19 @@ export function MoomooInvestmentsView({
               onClick={() => {
                 onResetToZero({
                   accounts: false,
-                  moomoo: true,
+                  investments: true,
                   transactions: false,
                   scope: activeProfile,
                 });
-                setConfirmZeroMoomoo(false);
+                setConfirmZeroInvestments(false);
               }}
               className="px-3 py-1.5 bg-red-700 text-white font-semibold rounded-md hover:bg-red-800"
             >
-              {tr('Sí, volver Moomoo a $0', 'Yes, reset Moomoo to $0')}
+              {tr('Sí, volver inversiones a $0', 'Yes, reset investments to $0')}
             </button>
             <button
               type="button"
-              onClick={() => setConfirmZeroMoomoo(false)}
+              onClick={() => setConfirmZeroInvestments(false)}
               className="px-3 py-1.5 bg-white dark:bg-[#062035] border border-[#C6DAF7] dark:border-[#1B4A7C] text-[#031725] dark:text-[#DAEAFF] font-medium rounded-md"
             >
               {tr('Cancelar', 'Cancel')}
@@ -620,7 +627,7 @@ export function MoomooInvestmentsView({
             <h2 className="text-base font-semibold text-[#031725] dark:text-[#DAEAFF]">
               {editingHolding
                 ? tr(`Editar ${editingHolding.ticker}`, `Edit ${editingHolding.ticker}`)
-                : tr('Agregar inversión en Moomoo', 'Add Moomoo investment')}
+                : tr('Agregar inversión', 'Add investment')}
             </h2>
             <button
               type="button"
@@ -638,12 +645,34 @@ export function MoomooInvestmentsView({
               </label>
               <select
                 value={formOwner}
-                onChange={(e) => setFormOwner(e.target.value as ProfileId)}
+                onChange={(e) => {
+                  const nextOwner = e.target.value as ProfileId;
+                  setFormOwner(nextOwner);
+                  setFormAccountId(investmentAccountsFor(nextOwner)[0]?.id || '');
+                }}
                 className="w-full px-3 py-2 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg text-sm bg-white dark:bg-[#031725] text-[#031725] dark:text-[#DAEAFF]"
               >
                 {state.profiles.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="inv-account" className="block text-[#355170] dark:text-[#A1C6F6] mb-1">
+                {tr('Cuenta de inversión', 'Investment account')}
+              </label>
+              <select
+                id="inv-account"
+                value={formAccountId}
+                onChange={(e) => setFormAccountId(e.target.value)}
+                className="w-full px-3 py-2 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg text-sm bg-white dark:bg-[#031725] text-[#031725] dark:text-[#DAEAFF]"
+              >
+                <option value="">{tr('Sin asociar', 'Not linked')}</option>
+                {investmentAccountsFor(formOwner).map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {accountDisplayName(a)}
                   </option>
                 ))}
               </select>
@@ -783,7 +812,7 @@ export function MoomooInvestmentsView({
         <div className="px-6 py-4 border-b border-[#D3E3FA] dark:border-[#123B66] flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="text-base font-semibold text-[#031725] dark:text-[#DAEAFF]">
-              {tr('Posiciones actuales en Moomoo', 'Current Moomoo Holdings')}
+              {tr('Posiciones actuales', 'Current holdings')}
             </h2>
             <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6]">
               {tr(
@@ -801,8 +830,8 @@ export function MoomooInvestmentsView({
           <div className="p-10 text-center space-y-3">
             <p className="text-sm text-[#5A7694] dark:text-[#A1C6F6]">
               {tr(
-                'No hay acciones o ETFs registrados en Moomoo para este perfil todavía.',
-                'No stocks or ETFs recorded in Moomoo for this profile yet.'
+                'Todavía no hay acciones o ETFs registrados para este perfil.',
+                'No stocks or ETFs recorded for this profile yet.'
               )}
             </p>
             <div className="flex items-center justify-center gap-3">
@@ -818,7 +847,7 @@ export function MoomooInvestmentsView({
                 onClick={onOpenCsvImport}
                 className="px-4 py-2 bg-white dark:bg-[#022E5B]/80 border border-[#C6DAF7] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-sm font-medium rounded-lg hover:bg-[#DAEAFF]/50 dark:hover:bg-[#022E5B]"
               >
-                {tr('Importar PDF / CSV de Moomoo', 'Import Moomoo PDF / CSV')}
+                {tr('Importar extracto del broker', 'Import broker statement')}
               </button>
             </div>
           </div>
@@ -857,6 +886,11 @@ export function MoomooInvestmentsView({
                       </td>
                       <td className="py-3 px-4 text-xs text-[#355170] dark:text-[#A1C6F6]">
                         {getProfileLabel(h.owner, state.profiles)}
+                        {h.accountId && (
+                          <div className="text-[11px] text-[#5A7694] dark:text-[#7FA6D6] truncate max-w-[160px]">
+                            {state.accounts.find((a) => a.id === h.accountId)?.name}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-right font-mono-num text-[#355170] dark:text-[#DAEAFF]">
                         {h.shares}
@@ -966,8 +1000,8 @@ export function MoomooInvestmentsView({
             <div>
               <h2 className="text-lg font-bold text-[#031725] dark:text-[#DAEAFF]">
                 {tr(
-                  'Calculadora de Crecimiento y Reinversión de Dividendos (Moomoo)',
-                  'Growth & Dividend Reinvestment Calculator (Moomoo DRIP)'
+                  'Calculadora de crecimiento y reinversión de dividendos',
+                  'Growth & Dividend Reinvestment Calculator (DRIP)'
                 )}
               </h2>
               <p className="text-sm text-[#355170] dark:text-[#A1C6F6] mt-0.5">
@@ -1213,8 +1247,8 @@ export function MoomooInvestmentsView({
               </h2>
               <p className="text-sm text-[#355170] dark:text-[#A1C6F6] mt-0.5">
                 {tr(
-                  `Proyecta cuánto aumentará el capital de ${householdNames} si mantienen sus inversiones en Moomoo cobrando y acumulando dividendos.`,
-                  `Forecast how much ${householdNames} capital will grow by holding their Moomoo investments and collecting dividends.`
+                  `Proyecta cuánto aumentará el capital de ${householdNames} si mantienen sus inversiones cobrando y acumulando dividendos.`,
+                  `Forecast how much ${householdNames} capital will grow by holding their investments and collecting dividends.`
                 )}
               </p>
             </div>
@@ -1344,7 +1378,7 @@ export function MoomooInvestmentsView({
             </label>
           </div>
 
-          {/* Dynamic per-profile Moomoo dividend controls */}
+          {/* Dynamic per-profile dividend controls */}
           {visibleProfiles.map((profile) => {
             const capVal = divCaps[profile.id] ?? ownerPortfolioStats[profile.id]?.current ?? 0;
             const yieldVal =
@@ -1361,7 +1395,7 @@ export function MoomooInvestmentsView({
                     className="w-2.5 h-2.5 rounded-full shrink-0"
                     style={{ backgroundColor: getSafeProfileChartColor(profile.color, isDark) }}
                   />
-                  Moomoo · {profile.name} ({displayCurr})
+                  {tr('Inversiones', 'Investments')} · {profile.name} ({displayCurr})
                 </div>
                 <div>
                   <div className="flex justify-between text-xs mb-1">
@@ -1584,7 +1618,7 @@ export function MoomooInvestmentsView({
                     key={p.id}
                     type="monotone"
                     dataKey={`profileCapitals.${p.id}`}
-                    name={`Moomoo ${p.name}`}
+                    name={`${tr('Inversiones', 'Investments')} ${p.name}`}
                     stroke={getSafeProfileChartColor(p.color, isDark)}
                     strokeWidth={2}
                     fill="none"

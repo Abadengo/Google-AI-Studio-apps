@@ -17,7 +17,7 @@ export interface SavingsGrowthPoint {
   monthKey: string;
   label: string;
   ahorroAcumulado: number;
-  goalSaverByProfile: Record<string, number>;
+  savingsByProfile: Record<string, number>;
 }
 
 interface CustomTooltipProps {
@@ -89,15 +89,15 @@ export function SavingsGrowthLineChart({
   const hasAnyData = data.some(
     (d) =>
       Math.abs(d.ahorroAcumulado) > 0 ||
-      Object.values(d.goalSaverByProfile).some((v) => v > 0)
+      Object.values(d.savingsByProfile).some((v) => v > 0)
   );
 
   if (!hasAnyData) {
     return (
       <div className="py-12 text-center text-sm text-[#496685] dark:text-[#A1C6F6]">
         {tr(
-          'Aún no hay movimientos ni saldos en GoalSaver para graficar la evolución histórica.',
-          'No transactions or GoalSaver balances yet to plot historical growth.'
+          'Aún no hay movimientos ni saldos de ahorro para graficar la evolución histórica.',
+          'No transactions or savings balances yet to plot historical growth.'
         )}
       </div>
     );
@@ -162,8 +162,8 @@ export function SavingsGrowthLineChart({
               <Line
                 key={p.id}
                 type="monotone"
-                dataKey={`goalSaverByProfile.${p.id}`}
-                name={`GoalSaver · ${p.name}`}
+                dataKey={`savingsByProfile.${p.id}`}
+                name={`${tr('Ahorro', 'Savings')} · ${p.name}`}
                 stroke={strokeColor}
                 strokeWidth={2.5}
                 dot={{ r: 3.5, fill: strokeColor, strokeWidth: 0 }}

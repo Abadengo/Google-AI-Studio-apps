@@ -1,153 +1,56 @@
 import { useCallback, useEffect, useState } from 'react';
+import { createInitialFinanceState, createSavingsConfig } from '../data/defaultState';
+import { normalizeState } from '../data/migrations';
 import {
-  createDefaultGoalSaverForProfile,
-  createInitialFinanceState,
-  DEFAULT_FIXED_EXPENSES,
-  DEFAULT_PROFILES,
-} from '../data/defaultState';
-import type {
-  Account,
-  Budget,
-  Category,
-  CurrencyCode,
-  ExchangeRates,
-  FinanceState,
-  FixedExpense,
-  GoalSaverProfile,
-  MoomooHolding,
-  ProfileFilter,
-  ProfileId,
-  Transaction,
-  UserProfile,
+  CURRENT_DATA_VERSION,
+  type Account,
+  type Budget,
+  type Category,
+  type CurrencyCode,
+  type ExchangeRates,
+  type FinanceState,
+  type FixedExpense,
+  type InvestmentHolding,
+  type ProfileFilter,
+  type ProfileId,
+  type SavingsInterestConfig,
+  type Transaction,
+  type UserProfile,
 } from '../types/finance';
 
+// IMPORTANT: real household data lives under this key. Never rename it; change the data shape
+// through a migration in data/migrations.ts instead.
 const STORAGE_KEY = 'finanzas_hogar_abdiel_lara_v1';
-
-function hydrateProfilesAndGoalSavers(
-  rawProfiles: UserProfile[] | undefined,
-  rawGoalSavers: Record<string, GoalSaverProfile> | undefined,
-  fallbackGoalSavers: Record<string, GoalSaverProfile>
-): {
-  profiles: UserProfile[];
-  goalSavers: Record<string, GoalSaverProfile>;
-} {
-  const profiles: UserProfile[] =
-    Array.isArray(rawProfiles) && rawProfiles.length > 0
-      ? rawProfiles.map((p, idx) => ({
-          id: p.id,
-          name: p.name || p.id,
-          email: p.email || '',
-          role: p.role || '',
-          phone: p.phone || '',
-          country: p.country || '',
-          notes: p.notes || '',
-          color: p.color || (idx % 2 === 0 ? '#022E5B' : '#499BED'),
-        }))
-      : DEFAULT_PROFILES;
-
-  const goalSavers: Record<string, GoalSaverProfile> = {
-    ...(rawGoalSavers || fallbackGoalSavers),
-  };
-
-  for (const p of profiles) {
-    if (!goalSavers[p.id]) {
-      goalSavers[p.id] = createDefaultGoalSaverForProfile(p);
-    }
-  }
-
-  return { profiles, goalSavers };
-}
 
 function uid(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-const VALID_CURRENCIES = new Set<CurrencyCode>(['AUD', 'USD', 'EUR', 'ARS', 'MXN', 'CLP']);
-
-function sanitizeRates(raw: unknown, fallback: ExchangeRates): ExchangeRates {
-  const out: ExchangeRates = { ...fallback };
-  if (raw && typeof raw === 'object') {
-    for (const code of Object.keys(fallback) as CurrencyCode[]) {
-      const v = Number((raw as Record<string, unknown>)[code]);
-      if (Number.isFinite(v) && v > 0) out[code] = v;
-    }
-  }
-  out.AUD = 1;
-  return out;
-}
-
-/**
- * Turns any persisted / restored JSON into a valid FinanceState, filling missing pieces and
- * dropping malformed rows so a damaged backup can't crash the app.
- */
-function normalizeState(parsed: Partial<FinanceState>): FinanceState {
-  const fallback = createInitialFinanceState(false);
-  const { profiles, goalSavers } = hydrateProfilesAndGoalSavers(
-    parsed.profiles,
-    parsed.goalSavers,
-    fallback.goalSavers
-  );
-
-  const transactions = (Array.isArray(parsed.transactions) ? parsed.transactions : [])
-    .filter(
-      (t): t is Transaction =>
-        Boolean(t) &&
-        typeof t.id === 'string' &&
-        typeof t.date === 'string' &&
-        Number.isFinite(Number(t.amount))
-    )
-    .map((t) => ({
-      ...t,
-      amount: Math.abs(Number(t.amount)),
-      currency: VALID_CURRENCIES.has(t.currency) ? t.currency : 'AUD',
-      description: String(t.description ?? ''),
-      accountId: t.accountId ?? '',
-    }))
-    .sort((a, b) => b.date.localeCompare(a.date));
-
-  return {
-    version: parsed.version ?? 1,
-    displayCurrency:
-      parsed.displayCurrency && VALID_CURRENCIES.has(parsed.displayCurrency) ? parsed.displayCurrency : 'AUD',
-    exchangeRates: sanitizeRates(parsed.exchangeRates, fallback.exchangeRates),
-    profiles,
-    // An empty list is a valid user choice (all accounts deleted): don't resurrect sample accounts.
-    accounts: Array.isArray(parsed.accounts)
-      ? parsed.accounts.map((a) => ({ ...a, initialBalance: Number(a.initialBalance) || 0 }))
-      : fallback.accounts,
-    categories:
-      Array.isArray(parsed.categories) && parsed.categories.length > 0
-        ? parsed.categories
-        : fallback.categories,
-    transactions,
-    budgets: Array.isArray(parsed.budgets) ? parsed.budgets : fallback.budgets,
-    goalSavers,
-    moomooHoldings: Array.isArray(parsed.moomooHoldings) ? parsed.moomooHoldings : [],
-    fixedExpenses: Array.isArray(parsed.fixedExpenses)
-      ? parsed.fixedExpenses
-      : parsed.isSampleData
-      ? DEFAULT_FIXED_EXPENSES
-      : [],
-    fixedExpensePaidByMonth:
-      parsed.fixedExpensePaidByMonth && typeof parsed.fixedExpensePaidByMonth === 'object'
-        ? parsed.fixedExpensePaidByMonth
-        : {},
-    isSampleData: Boolean(parsed.isSampleData),
-  };
-}
-
 function loadStateFromStorage(): FinanceState {
+  let raw: string | null = null;
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return createInitialFinanceState(true);
+    raw = window.localStorage.getItem(STORAGE_KEY);
+  } catch {
+    raw = null;
+  }
+  if (!raw) return createInitialFinanceState(true);
+
+  try {
+    const parsed = JSON.parse(raw) as { version?: number };
+    const storedVersion = Number(parsed?.version) || 1;
+    if (storedVersion < CURRENT_DATA_VERSION) {
+      // Keep an untouched copy of the pre-migration data, just in case.
+      try {
+        window.localStorage.setItem(`${STORAGE_KEY}_pre_v${CURRENT_DATA_VERSION}_backup`, raw);
+      } catch {
+        /* storage full: the migration still runs, the original stays in memory */
+      }
     }
-    return normalizeState(JSON.parse(raw) as Partial<FinanceState>);
+    return normalizeState(parsed);
   } catch (err) {
     // Never silently overwrite unreadable data: keep a copy before falling back to samples.
     try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) window.localStorage.setItem(`${STORAGE_KEY}_corrupt_${Date.now()}`, raw);
+      window.localStorage.setItem(`${STORAGE_KEY}_corrupt_${Date.now()}`, raw);
     } catch {
       /* ignore */
     }
@@ -199,7 +102,11 @@ export function useFinanceStore() {
   }, []);
 
   const updateExchangeRates = useCallback((rates: ExchangeRates) => {
-    setState((prev) => ({ ...prev, exchangeRates: rates }));
+    setState((prev) => ({ ...prev, exchangeRates: { ...rates, AUD: 1 }, exchangeRatesUpdatedAt: new Date().toISOString() }));
+  }, []);
+
+  const markBackupDone = useCallback(() => {
+    setState((prev) => ({ ...prev, lastBackupAt: new Date().toISOString() }));
   }, []);
 
   // Transactions
@@ -340,6 +247,11 @@ export function useFinanceStore() {
           return t;
         }),
       fixedExpenses: prev.fixedExpenses.filter((f) => f.accountId !== id),
+      // Keep interest settings and holdings, just unlink them from the deleted account.
+      savingsConfigs: prev.savingsConfigs.map((c) =>
+        c.accountId === id ? { ...c, accountId: undefined, useAccountBalance: false } : c
+      ),
+      investments: prev.investments.map((h) => (h.accountId === id ? { ...h, accountId: undefined } : h)),
     }));
   }, []);
 
@@ -396,10 +308,6 @@ export function useFinanceStore() {
     setState((prev) => ({
       ...prev,
       profiles: [...prev.profiles, newProfile],
-      goalSavers: {
-        ...prev.goalSavers,
-        [id]: createDefaultGoalSaverForProfile(newProfile),
-      },
     }));
     return id;
   }, []);
@@ -407,19 +315,11 @@ export function useFinanceStore() {
   const updateProfile = useCallback((updated: UserProfile) => {
     setState((prev) => {
       const nextName = updated.name.trim() || prev.profiles.find((p) => p.id === updated.id)?.name || 'Perfil';
-      const currentGs = prev.goalSavers[updated.id] || createDefaultGoalSaverForProfile({ id: updated.id, name: nextName });
       return {
         ...prev,
         profiles: prev.profiles.map((p) =>
           p.id === updated.id ? { ...updated, name: nextName } : p
         ),
-        goalSavers: {
-          ...prev.goalSavers,
-          [updated.id]: {
-            ...currentGs,
-            accountName: `CommBank GoalSaver · ${nextName}`,
-          },
-        },
       };
     });
   }, []);
@@ -431,9 +331,6 @@ export function useFinanceStore() {
       const validReassign =
         reassignToId && remaining.some((p) => p.id === reassignToId) ? reassignToId : undefined;
 
-      const nextGoalSavers = { ...prev.goalSavers };
-      delete nextGoalSavers[id];
-
       const deletedAccountIds = new Set(
         prev.accounts.filter((a) => a.owner === id).map((a) => a.id)
       );
@@ -441,7 +338,9 @@ export function useFinanceStore() {
       return {
         ...prev,
         profiles: remaining,
-        goalSavers: nextGoalSavers,
+        savingsConfigs: validReassign
+          ? prev.savingsConfigs.map((c) => (c.owner === id ? { ...c, owner: validReassign } : c))
+          : prev.savingsConfigs.filter((c) => c.owner !== id),
         accounts: validReassign
           ? prev.accounts.map((a) => (a.owner === id ? { ...a, owner: validReassign } : a))
           : prev.accounts.filter((a) => a.owner !== id),
@@ -450,9 +349,9 @@ export function useFinanceStore() {
           : prev.transactions.filter(
               (t) => t.owner !== id && !deletedAccountIds.has(t.accountId)
             ),
-        moomooHoldings: validReassign
-          ? prev.moomooHoldings.map((h) => (h.owner === id ? { ...h, owner: validReassign } : h))
-          : prev.moomooHoldings.filter((h) => h.owner !== id),
+        investments: validReassign
+          ? prev.investments.map((h) => (h.owner === id ? { ...h, owner: validReassign } : h))
+          : prev.investments.filter((h) => h.owner !== id),
         fixedExpenses: validReassign
           ? prev.fixedExpenses.map((f) => (f.owner === id ? { ...f, owner: validReassign } : f))
           : prev.fixedExpenses.filter(
@@ -465,55 +364,58 @@ export function useFinanceStore() {
     });
   }, []);
 
-  // GoalSaver
-  const updateGoalSaver = useCallback((owner: ProfileId, patch: Partial<GoalSaverProfile>) => {
-    setState((prev) => {
-      const profile = prev.profiles.find((p) => p.id === owner);
-      const base =
-        prev.goalSavers[owner] ||
-        createDefaultGoalSaverForProfile({ id: owner, name: profile?.name || owner });
-      return {
-        ...prev,
-        goalSavers: {
-          ...prev.goalSavers,
-          [owner]: {
-            ...base,
-            ...patch,
-          },
-        },
-      };
-    });
+  // Savings accounts with interest (formerly "GoalSaver")
+  const addSavingsConfig = useCallback(
+    (params: { owner: ProfileId; name: string; accountId?: string; currency?: CurrencyCode }) => {
+      const cfg = createSavingsConfig(params);
+      setState((prev) => ({ ...prev, savingsConfigs: [...prev.savingsConfigs, cfg] }));
+      return cfg.id;
+    },
+    []
+  );
+
+  const updateSavingsConfig = useCallback((id: string, patch: Partial<SavingsInterestConfig>) => {
+    setState((prev) => ({
+      ...prev,
+      savingsConfigs: prev.savingsConfigs.map((c) => (c.id === id ? { ...c, ...patch, id: c.id } : c)),
+    }));
   }, []);
 
-  // Moomoo Holdings
-  const addMoomooHolding = useCallback((holding: Omit<MoomooHolding, 'id'>) => {
-    const id = uid('moo');
+  const deleteSavingsConfig = useCallback((id: string) => {
+    setState((prev) => ({ ...prev, savingsConfigs: prev.savingsConfigs.filter((c) => c.id !== id) }));
+  }, []);
+
+  // Investments
+  const addInvestment = useCallback((holding: Omit<InvestmentHolding, 'id'>) => {
+    const id = uid('inv');
     setState((prev) => ({
       ...prev,
       isSampleData: false,
-      moomooHoldings: [...prev.moomooHoldings, { ...holding, id }],
+      investments: [...prev.investments, { ...holding, id }],
     }));
   }, []);
 
-  const updateMoomooHolding = useCallback((updated: MoomooHolding) => {
+  const updateInvestment = useCallback((updated: InvestmentHolding) => {
     setState((prev) => ({
       ...prev,
       isSampleData: false,
-      moomooHoldings: prev.moomooHoldings.map((h) => (h.id === updated.id ? updated : h)),
+      investments: prev.investments.map((h) => (h.id === updated.id ? updated : h)),
     }));
   }, []);
 
-  const deleteMoomooHolding = useCallback((id: string) => {
+  const deleteInvestment = useCallback((id: string) => {
     setState((prev) => ({
       ...prev,
-      moomooHoldings: prev.moomooHoldings.filter((h) => h.id !== id),
+      investments: prev.investments.filter((h) => h.id !== id),
     }));
   }, []);
 
-  const importMoomooHoldingsBatch = useCallback(
+  const importInvestmentTradesBatch = useCallback(
     (
       trades: Array<{
         owner: ProfileId;
+        /** Destination investment account (optional). */
+        accountId?: string;
         ticker: string;
         name: string;
         assetType: 'ETF' | 'Acción' | 'Fondo';
@@ -524,11 +426,14 @@ export function useFinanceStore() {
       }>
     ) => {
       setState((prev) => {
-        const nextHoldings = [...prev.moomooHoldings];
+        const nextHoldings = [...prev.investments];
         for (const t of trades) {
           const tickerUpper = t.ticker.toUpperCase().trim();
           const idx = nextHoldings.findIndex(
-            (h) => h.owner === t.owner && h.ticker.toUpperCase() === tickerUpper
+            (h) =>
+              h.owner === t.owner &&
+              h.ticker.toUpperCase() === tickerUpper &&
+              (!t.accountId || !h.accountId || h.accountId === t.accountId)
           );
           if (idx >= 0) {
             const current = nextHoldings[idx];
@@ -553,7 +458,8 @@ export function useFinanceStore() {
             }
           } else if (t.side === 'BUY' && t.shares > 0) {
             nextHoldings.push({
-              id: `moo_csv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              id: uid('inv'),
+              accountId: t.accountId,
               owner: t.owner,
               ticker: tickerUpper,
               name: t.name || tickerUpper,
@@ -569,7 +475,7 @@ export function useFinanceStore() {
         return {
           ...prev,
           isSampleData: false,
-          moomooHoldings: nextHoldings.filter((h) => h.shares > 0),
+          investments: nextHoldings.filter((h) => h.shares > 0),
         };
       });
     },
@@ -619,7 +525,8 @@ export function useFinanceStore() {
       if (!parsed || !Array.isArray(parsed.accounts) || !Array.isArray(parsed.transactions)) {
         return { ok: false, error: 'El archivo no tiene el formato de respaldo válido.' };
       }
-      setState(normalizeState({ ...parsed, fixedExpenses: Array.isArray(parsed.fixedExpenses) ? parsed.fixedExpenses : [] }));
+      // Old backups (any version) are migrated to the current structure here.
+      setState(normalizeState(parsed));
       return { ok: true };
     } catch {
       return { ok: false, error: 'No se pudo leer el archivo JSON. Verifica que no esté dañado.' };
@@ -627,34 +534,25 @@ export function useFinanceStore() {
   }, []);
 
   const clearToBlank = useCallback(() => {
-    setState((prev) => {
-      const zeroGoalSavers: Record<string, GoalSaverProfile> = {};
-      for (const p of prev.profiles) {
-        const cur = prev.goalSavers[p.id] || createDefaultGoalSaverForProfile(p);
-        zeroGoalSavers[p.id] = { ...cur, currentBalance: 0 };
-      }
-      return {
-        ...createInitialFinanceState(false),
-        profiles: prev.profiles,
-        accounts: prev.accounts.map((a) => ({ ...a, initialBalance: 0 })),
-        categories: prev.categories,
-        budgets: prev.budgets,
-        displayCurrency: prev.displayCurrency,
-        exchangeRates: prev.exchangeRates,
-        goalSavers: zeroGoalSavers,
-        transactions: [],
-        moomooHoldings: [],
-        fixedExpenses: [],
-        fixedExpensePaidByMonth: {},
-        isSampleData: false,
-      };
-    });
+    setState((prev) => ({
+      ...createInitialFinanceState(false),
+      profiles: prev.profiles,
+      accounts: prev.accounts.map((a) => ({ ...a, initialBalance: 0 })),
+      categories: prev.categories,
+      budgets: prev.budgets,
+      displayCurrency: prev.displayCurrency,
+      exchangeRates: prev.exchangeRates,
+      exchangeRatesUpdatedAt: prev.exchangeRatesUpdatedAt,
+      savingsConfigs: prev.savingsConfigs.map((c) => ({ ...c, currentBalance: 0 })),
+      lastBackupAt: prev.lastBackupAt,
+      isSampleData: false,
+    }));
   }, []);
 
   const resetToZero = useCallback(
     (options: {
       accounts: boolean;
-      moomoo: boolean;
+      investments: boolean;
       transactions: boolean;
       scope?: ProfileFilter;
     }) => {
@@ -664,26 +562,19 @@ export function useFinanceStore() {
       setState((prev) => {
         const nextAccounts = prev.accounts.map((acc) => {
           if (!matchesOwner(acc.owner)) return acc;
-          if (options.accounts || (options.moomoo && acc.kind === 'moomoo')) {
+          if (options.accounts || (options.investments && acc.kind === 'inversion')) {
             return { ...acc, initialBalance: 0 };
           }
           return acc;
         });
 
-        const nextGoalSavers: Record<string, GoalSaverProfile> = { ...prev.goalSavers };
-        if (options.accounts) {
-          for (const p of prev.profiles) {
-            if (!matchesOwner(p.id)) continue;
-            const cur = nextGoalSavers[p.id] || createDefaultGoalSaverForProfile(p);
-            nextGoalSavers[p.id] = { ...cur, currentBalance: 0 };
-          }
-        }
+        const nextSavings = options.accounts
+          ? prev.savingsConfigs.map((c) => (matchesOwner(c.owner) ? { ...c, currentBalance: 0 } : c))
+          : prev.savingsConfigs;
 
-        const nextMoomooHoldings = options.moomoo
-          ? scope === 'all'
-            ? []
-            : prev.moomooHoldings.filter((h) => !matchesOwner(h.owner))
-          : prev.moomooHoldings;
+        const nextInvestments = options.investments
+          ? prev.investments.filter((h) => !matchesOwner(h.owner))
+          : prev.investments;
 
         const nextTransactions = options.transactions
           ? scope === 'all'
@@ -715,8 +606,8 @@ export function useFinanceStore() {
           ...prev,
           isSampleData: false,
           accounts: nextAccounts,
-          goalSavers: nextGoalSavers,
-          moomooHoldings: nextMoomooHoldings,
+          savingsConfigs: nextSavings,
+          investments: nextInvestments,
           transactions: nextTransactions,
           fixedExpensePaidByMonth: nextPaidMap,
         };
@@ -748,11 +639,14 @@ export function useFinanceStore() {
     deleteAccount,
     upsertBudget,
     deleteBudget,
-    updateGoalSaver,
-    addMoomooHolding,
-    updateMoomooHolding,
-    deleteMoomooHolding,
-    importMoomooHoldingsBatch,
+    addSavingsConfig,
+    updateSavingsConfig,
+    deleteSavingsConfig,
+    addInvestment,
+    updateInvestment,
+    deleteInvestment,
+    importInvestmentTradesBatch,
+    markBackupDone,
     toggleFixedExpensePaid,
     addFixedExpense,
     deleteFixedExpense,

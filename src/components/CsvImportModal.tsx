@@ -23,7 +23,7 @@ import type {
   AccountKind,
   Category,
   CurrencyCode,
-  GoalSaverProfile,
+  SavingsInterestConfig,
   ProfileFilter,
   ProfileId,
   Transaction,
@@ -38,10 +38,15 @@ import {
   guessCategoryId,
   normalizeDateToISO,
   parseCsvText,
+  accountKindLabel,
   downloadBlob,
+  FILE_FORMAT_LABELS,
+  fileFormatLabel,
+  suggestedKindForFormat,
   parseNumericAmount,
   type CsvPreset,
 } from '../utils/formatters';
+import { ACCOUNT_KINDS } from '../data/migrations';
 import {
   generateSamplePdfStatementBytes,
   parsePdfStatement,
@@ -71,9 +76,10 @@ interface CsvImportModalProps {
   activeProfile: ProfileFilter;
   initialPreset?: CsvPreset;
   onImportTransactions: (items: Omit<Transaction, 'id'>[]) => number;
-  onImportMoomooTrades: (
+  onImportInvestmentTrades: (
     trades: Array<{
       owner: ProfileId;
+      accountId?: string;
       ticker: string;
       name: string;
       assetType: 'ETF' | 'Acción' | 'Fondo';
@@ -83,7 +89,8 @@ interface CsvImportModalProps {
       currency: CurrencyCode;
     }>
   ) => void;
-  onUpdateGoalSaver?: (owner: ProfileId, patch: Partial<GoalSaverProfile>) => void;
+  savingsConfigs: SavingsInterestConfig[];
+  onUpdateSavingsConfig?: (id: string, patch: Partial<SavingsInterestConfig>) => void;
   onAddAccount: (acc: Omit<Account, 'id'>) => string;
 }
 
@@ -168,6 +175,7 @@ interface ImportedFileEntry {
     name: string;
     owner: ProfileId;
     kind: AccountKind;
+    institution: string;
     currency: CurrencyCode;
     notes: string;
   };
@@ -253,8 +261,9 @@ export function CsvImportModal({
   activeProfile,
   initialPreset = 'auto',
   onImportTransactions,
-  onImportMoomooTrades,
-  onUpdateGoalSaver,
+  onImportInvestmentTrades,
+  savingsConfigs,
+  onUpdateSavingsConfig,
   onAddAccount,
 }: CsvImportModalProps) {
   const { tr, catName, lang } = useUiPreferences();
@@ -407,21 +416,26 @@ export function CsvImportModal({
         }))
       );
 
-      const isGoalSaverContext =
-        entry.preset === 'goalsaver' || targetAcc?.kind === 'goalsaver';
+      // Savings statement: its closing balance can update the linked "savings with interest" settings.
+      const isGoalSaverContext = entry.preset === 'goalsaver' || targetAcc?.kind === 'ahorro';
+      const savingsTarget = isGoalSaverContext
+        ? savingsConfigs.find((c) => c.accountId && c.accountId === targetAcc?.id) ||
+          savingsConfigs.find((c) => !c.accountId && c.owner === entry.owner)
+        : undefined;
 
       return {
         entry,
         targetAccount: targetAcc,
         isMoomooMode,
-        isGoalSaverContext,
+        isGoalSaverContext: Boolean(savingsTarget) && !savingsTarget?.useAccountBalance,
+        savingsTarget,
         previewRows,
         selectedRows,
         duplicateCount,
         newCount,
       };
     });
-  }, [files, existingTransactions, accounts, tr]);
+  }, [files, existingTransactions, accounts, savingsConfigs, tr]);
 
   const activeComputed = useMemo(() => {
     if (computedFiles.length === 0) return null;
@@ -460,16 +474,10 @@ export function CsvImportModal({
   const defaultPrimaryOwner: ProfileId =
     activeProfile !== 'all' && profiles.some((p) => p.id === activeProfile)
       ? activeProfile
-      : profiles[0]?.id || 'abdiel';
+      : profiles[0]?.id || '';
   const secondOwner: ProfileId = profiles[1]?.id || defaultPrimaryOwner;
 
-  const presetToKind = (p: Exclude<CsvPreset, 'auto'>): AccountKind => {
-    if (p === 'commbank') return 'commbank';
-    if (p === 'goalsaver') return 'goalsaver';
-    if (p === 'revolut') return 'revolut';
-    if (p === 'moomoo') return 'moomoo';
-    return 'other';
-  };
+  const presetToKind = (p: Exclude<CsvPreset, 'auto'>): AccountKind => suggestedKindForFormat(p);
 
   const buildNewAccountDraft = (
     suggestion: SuggestedNewAccount | null | undefined,
@@ -477,11 +485,10 @@ export function CsvImportModal({
     preset: Exclude<CsvPreset, 'auto'>,
     currency: CurrencyCode
   ) => ({
-    name:
-      suggestion?.name ||
-      `${preset === 'generic' ? tr('Cuenta nueva', 'New Account') : preset.toUpperCase()} (${currency})`,
+    name: suggestion?.name || `${tr('Cuenta nueva', 'New account')} (${currency})`,
     owner: suggestion?.owner || owner,
     kind: suggestion?.kind || presetToKind(preset),
+    institution: suggestion?.institution || '',
     currency: suggestion?.currency || currency,
     notes: suggestion?.notes || tr('Cuenta creada al importar statement', 'Created from imported statement'),
   });
@@ -634,13 +641,14 @@ export function CsvImportModal({
       ? {
           name:
             aiRes.suggestedNewAccount?.name ||
-            `${aiRes.preset.toUpperCase()} (${aiRes.detectedCurrency})`,
+            `${tr('Cuenta nueva', 'New account')} (${aiRes.detectedCurrency})`,
           owner:
             aiRes.suggestedNewAccount?.owner &&
             profiles.some((p) => p.id === aiRes.suggestedNewAccount?.owner)
               ? aiRes.suggestedNewAccount.owner
               : finalOwner,
           kind: aiRes.suggestedNewAccount?.kind || presetToKind(finalPreset),
+          institution: aiRes.suggestedNewAccount?.institution,
           currency: aiRes.suggestedNewAccount?.currency || aiRes.detectedCurrency || 'AUD',
           notes:
             aiRes.suggestedNewAccount?.notes ||
@@ -1259,6 +1267,7 @@ export function CsvImportModal({
     const allTransactionsToInsert: Omit<Transaction, 'id'>[] = [];
     const allMoomooTrades: Array<{
       owner: ProfileId;
+      accountId?: string;
       ticker: string;
       name: string;
       assetType: 'ETF' | 'Acción' | 'Fondo';
@@ -1267,7 +1276,7 @@ export function CsvImportModal({
       price: number;
       currency: CurrencyCode;
     }> = [];
-    const goalSaverUpdates: Array<{ owner: ProfileId; amount: number; currency: CurrencyCode }> = [];
+    const goalSaverUpdates: Array<{ owner: ProfileId; name: string; amount: number; currency: CurrencyCode }> = [];
 
     for (const cf of computedFiles) {
       const { entry, targetAccount, isMoomooMode, isGoalSaverContext, selectedRows } = cf;
@@ -1303,6 +1312,7 @@ export function CsvImportModal({
             )
             .map((r) => ({
               owner: entry.owner,
+              accountId: targetAccount?.kind === 'inversion' ? targetAccount.id : undefined,
               ticker: r.ticker!,
               name:
                 r.description.replace(/^(Compra|Venta)\s+[A-Z0-9.]+\s*·?\s*/i, '') || r.ticker!,
@@ -1344,15 +1354,17 @@ export function CsvImportModal({
 
       if (
         isGoalSaverContext &&
+        cf.savingsTarget &&
         entry.syncGoalSaverBalance &&
         entry.detectedClosingBalance &&
-        onUpdateGoalSaver
+        onUpdateSavingsConfig
       ) {
-        onUpdateGoalSaver(entry.owner, {
+        onUpdateSavingsConfig(cf.savingsTarget.id, {
           currentBalance: entry.detectedClosingBalance.amount,
         });
         goalSaverUpdates.push({
           owner: entry.owner,
+          name: cf.savingsTarget.name,
           amount: entry.detectedClosingBalance.amount,
           currency: entry.detectedClosingBalance.currency,
         });
@@ -1360,7 +1372,7 @@ export function CsvImportModal({
     }
 
     if (allMoomooTrades.length > 0) {
-      onImportMoomooTrades(allMoomooTrades);
+      onImportInvestmentTrades(allMoomooTrades);
     }
 
     const importedTxCount =
@@ -1391,8 +1403,8 @@ export function CsvImportModal({
           .map((g) => {
             const ownerName = getProfileLabel(g.owner, profiles);
             return tr(
-              `GoalSaver (${ownerName}) actualizado a ${formatMoney(g.amount, g.currency)}`,
-              `GoalSaver (${ownerName}) updated to ${formatMoney(g.amount, g.currency)}`
+              `${g.name} (${ownerName}) actualizado a ${formatMoney(g.amount, g.currency)}`,
+              `${g.name} (${ownerName}) updated to ${formatMoney(g.amount, g.currency)}`
             );
           })
           .join(' · ')
@@ -1409,13 +1421,7 @@ export function CsvImportModal({
     }, 1250);
   };
 
-  const presetLabel = (p: Exclude<CsvPreset, 'auto'>) => {
-    if (p === 'commbank') return 'CommBank';
-    if (p === 'goalsaver') return 'GoalSaver';
-    if (p === 'revolut') return 'Revolut';
-    if (p === 'moomoo') return 'Moomoo';
-    return tr('Otro / Wise', 'Other / Wise');
-  };
+  const presetLabel = (p: Exclude<CsvPreset, 'auto'>) => fileFormatLabel(p, lang);
 
   return (
     <div
@@ -1542,42 +1548,43 @@ export function CsvImportModal({
                   )}
                 </div>
 
-                {/* Secondary single-sample links */}
+                {/* Secondary single-sample links (examples of the file formats the importer recognises) */}
                 <div className="mt-3 flex flex-wrap items-center justify-center gap-x-3.5 gap-y-1 text-xs text-[#5A7694] dark:text-[#A1C6F6]">
+                  <span>{tr('Probar con un archivo de ejemplo, por formato:', 'Try a sample file, by format:')}</span>
                   <button
                     type="button"
                     onClick={() => handleLoadSamplePdfDirectly('commbank')}
                     className="hover:text-[#031725] dark:hover:text-[#DAEAFF] underline"
                   >
-                    + PDF CommBank
+                    PDF {presetLabel('commbank')}
                   </button>
                   <button
                     type="button"
                     onClick={() => handleLoadSamplePdfDirectly('goalsaver')}
                     className="hover:text-[#031725] dark:hover:text-[#DAEAFF] underline"
                   >
-                    + PDF GoalSaver
+                    PDF {presetLabel('goalsaver')}
                   </button>
                   <button
                     type="button"
                     onClick={() => handleLoadSamplePdfDirectly('moomoo')}
                     className="hover:text-[#031725] dark:hover:text-[#DAEAFF] underline"
                   >
-                    + PDF Moomoo
+                    PDF {presetLabel('moomoo')}
                   </button>
                   <button
                     type="button"
                     onClick={() => handleLoadSampleCsvDirectly('revolut')}
                     className="hover:text-[#031725] dark:hover:text-[#DAEAFF] underline"
                   >
-                    + CSV Revolut
+                    CSV {presetLabel('revolut')}
                   </button>
                   <button
                     type="button"
                     onClick={() => handleLoadSampleCsvDirectly('moomoo')}
                     className="hover:text-[#031725] dark:hover:text-[#DAEAFF] underline"
                   >
-                    + CSV Moomoo
+                    CSV {presetLabel('moomoo')}
                   </button>
                   <span className="text-[#A1C6F6] dark:text-[#1B4A7C]">|</span>
                   <button
@@ -1844,7 +1851,7 @@ export function CsvImportModal({
 
                         <div>
                           <label className="block text-[11px] font-medium text-[#5A7694] dark:text-[#A1C6F6] mb-1">
-                            {tr('Banco / Broker detectado', 'Detected bank / broker')}
+                            {tr('Formato de archivo detectado', 'Detected file format')}
                           </label>
                           <select
                             value={entry.preset}
@@ -1869,11 +1876,11 @@ export function CsvImportModal({
                             }}
                             className="w-full px-2.5 py-1.5 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg bg-white dark:bg-[#031725] text-[#031725] dark:text-[#DAEAFF]"
                           >
-                            <option value="commbank">CommBank</option>
-                            <option value="goalsaver">CommBank GoalSaver</option>
-                            <option value="revolut">Revolut</option>
-                            <option value="moomoo">Moomoo</option>
-                            <option value="generic">{tr('Otro / Wise / Externo', 'Other / Wise / External')}</option>
+                            {(Object.keys(FILE_FORMAT_LABELS) as Array<Exclude<CsvPreset, 'auto'>>).map((fmt) => (
+                              <option key={fmt} value={fmt}>
+                                {presetLabel(fmt)}
+                              </option>
+                            ))}
                           </select>
                         </div>
 
@@ -1981,7 +1988,7 @@ export function CsvImportModal({
                                   newAccDraft: { ...prev.newAccDraft, name: e.target.value },
                                 }))
                               }
-                              placeholder={tr('Nombre de la cuenta (ej. ING AUD)', 'Account name (e.g. ING AUD)')}
+                              placeholder={tr('Nombre de la cuenta (ej. Cuenta sueldo)', 'Account name (e.g. Salary account)')}
                               className="px-2.5 py-1.5 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg bg-white dark:bg-[#031725] text-[#031725] dark:text-[#DAEAFF] sm:col-span-2"
                             />
                             <select
@@ -2014,13 +2021,11 @@ export function CsvImportModal({
                                 }
                                 className="flex-1 px-2 py-1.5 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg bg-white dark:bg-[#031725] text-[#031725] dark:text-[#DAEAFF]"
                               >
-                                <option value="commbank">CommBank</option>
-                                <option value="goalsaver">GoalSaver</option>
-                                <option value="revolut">Revolut</option>
-                                <option value="wise">Wise</option>
-                                <option value="moomoo">Moomoo</option>
-                                <option value="cash">{tr('Efectivo', 'Cash')}</option>
-                                <option value="other">{tr('Otro banco', 'Other bank')}</option>
+                                {ACCOUNT_KINDS.map((k) => (
+                                  <option key={k} value={k}>
+                                    {accountKindLabel(k, lang)}
+                                  </option>
+                                ))}
                               </select>
                               <select
                                 value={entry.newAccDraft.currency}
@@ -2047,6 +2052,19 @@ export function CsvImportModal({
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <input
                               type="text"
+                              value={entry.newAccDraft.institution}
+                              onChange={(e) =>
+                                updateFileEntry(entry.id, (prev) => ({
+                                  ...prev,
+                                  newAccDraft: { ...prev.newAccDraft, institution: e.target.value },
+                                }))
+                              }
+                              placeholder={tr('Institución (opcional)', 'Institution (optional)')}
+                              aria-label={tr('Institución (opcional)', 'Institution (optional)')}
+                              className="w-44 px-2.5 py-1.5 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg bg-white dark:bg-[#031725] text-[#031725] dark:text-[#DAEAFF]"
+                            />
+                            <input
+                              type="text"
                               value={entry.newAccDraft.notes}
                               onChange={(e) =>
                                 updateFileEntry(entry.id, (prev) => ({
@@ -2055,6 +2073,7 @@ export function CsvImportModal({
                                 }))
                               }
                               placeholder={tr('Notas (ej. últimos dígitos o alias)', 'Notes (e.g. last 4 digits or alias)')}
+                              aria-label={tr('Notas', 'Notes')}
                               className="flex-1 min-w-[200px] px-2.5 py-1.5 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg bg-white dark:bg-[#031725] text-[#031725] dark:text-[#DAEAFF]"
                             />
                             <button
@@ -2067,6 +2086,7 @@ export function CsvImportModal({
                                   name: draft.name.trim(),
                                   owner: draft.owner,
                                   kind: draft.kind,
+                                  institution: draft.institution.trim() || undefined,
                                   currency: draft.currency,
                                   initialBalance: 0,
                                   notes: draft.notes.trim() || undefined,
@@ -2147,7 +2167,7 @@ export function CsvImportModal({
                 </div>
               )}
 
-              {/* PDF Diagnostics & GoalSaver Closing Balance Sync */}
+              {/* PDF diagnostics & savings closing-balance sync */}
               {(activeComputed.entry.pdfMeta ||
                 (activeComputed.isGoalSaverContext &&
                   activeComputed.entry.detectedClosingBalance)) && (
@@ -2199,7 +2219,8 @@ export function CsvImportModal({
 
                   {activeComputed.isGoalSaverContext &&
                     activeComputed.entry.detectedClosingBalance &&
-                    onUpdateGoalSaver && (
+                    activeComputed.savingsTarget &&
+                    onUpdateSavingsConfig && (
                       <label className="flex items-center gap-2 text-xs font-medium text-[#031725] dark:text-[#DAEAFF] cursor-pointer pt-0.5">
                         <input
                           type="checkbox"
@@ -2218,7 +2239,7 @@ export function CsvImportModal({
                             'Automatically update current capital for'
                           )}{' '}
                           <strong>
-                            GoalSaver ({getProfileLabel(activeComputed.entry.owner, profiles)})
+                            {activeComputed.savingsTarget.name} ({getProfileLabel(activeComputed.entry.owner, profiles)})
                           </strong>{' '}
                           {tr('a', 'to')}{' '}
                           <strong className="font-mono-num text-[#022E5B] dark:text-[#499BED]">
@@ -2348,7 +2369,7 @@ export function CsvImportModal({
                 </div>
               )}
 
-              {/* Moomoo Sync Toggle */}
+              {/* Portfolio sync toggle (broker statements) */}
               {activeComputed.isMoomooMode && (
                 <div className="border border-[#D3E3FA] dark:border-[#123B66] rounded-xl px-4 py-3 bg-[#F8FBFF] dark:bg-[#041E32] flex flex-wrap items-center justify-between gap-3">
                   <label className="inline-flex items-center gap-2 text-xs text-[#031725] dark:text-[#DAEAFF] font-medium cursor-pointer">
@@ -2367,11 +2388,11 @@ export function CsvImportModal({
                       `Actualizar automáticamente acciones y ETFs de ${getProfileLabel(
                         activeComputed.entry.owner,
                         profiles
-                      )} en Moomoo`,
+                      )} en el portafolio de inversiones`,
                       `Automatically sync ${getProfileLabel(
                         activeComputed.entry.owner,
                         profiles
-                      )}'s stocks & ETFs in Moomoo`
+                      )}'s stocks & ETFs in the investment portfolio`
                     )}
                   </label>
                   <span className="text-xs text-[#5A7694] dark:text-[#A1C6F6]">

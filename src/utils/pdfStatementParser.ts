@@ -975,13 +975,12 @@ function buildSinglePagePdfBytes(title: string, subtitle: string, tableLines: st
 
 export function generateSamplePdfStatementBytes(
   kind: 'commbank' | 'goalsaver' | 'revolut' | 'moomoo',
-  ownerHint: string = 'abdiel',
+  ownerHint: string = '',
   holderDisplayName?: string
 ): Uint8Array {
   const today = getTodayISO();
   const [y, m] = today.split('-');
-  const holderName =
-    holderDisplayName || (ownerHint === 'lara' ? 'Lara' : ownerHint === 'abdiel' ? 'Abdiel' : ownerHint);
+  const holderName = holderDisplayName || ownerHint || 'Titular de ejemplo';
 
   if (kind === 'commbank') {
     return buildSinglePagePdfBytes(

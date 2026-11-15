@@ -28,7 +28,7 @@ import {
 } from '../utils/aiClient';
 import { CURRENCY_META, getProfileLabel, getTodayISO, normalizeDateToISO } from '../utils/formatters';
 
-export type AgentTabContext = 'dashboard' | 'transactions' | 'budgets' | 'accounts' | 'moomoo';
+export type AgentTabContext = 'dashboard' | 'transactions' | 'budgets' | 'accounts' | 'investments';
 
 interface ChatTurn {
   id: string;
@@ -178,20 +178,20 @@ export function AiAgentDrawer({
     if (activeTab === 'accounts') {
       return [
         tr(
-          'Evalúa los saldos en CommBank, Revolut y GoalSaver y sugiere cómo maximizar el interés mensual',
-          'Evaluate balances across CommBank, Revolut, and GoalSaver and suggest how to maximize monthly interest'
+          'Evalúa los saldos de nuestras cuentas y fondos de ahorro y sugiere cómo maximizar el interés mensual',
+          'Evaluate balances across our accounts and savings funds and suggest how to maximize monthly interest'
         ),
         tr(
-          '¿Tenemos suficiente colchón líquido o deberíamos ajustar el aporte mensual a GoalSaver?',
-          'Do we have enough liquid buffer or should we adjust our monthly GoalSaver contribution?'
+          '¿Tenemos suficiente colchón líquido o deberíamos ajustar el aporte mensual al fondo de ahorro?',
+          'Do we have enough liquid buffer or should we adjust our monthly savings contribution?'
         ),
       ];
     }
-    if (activeTab === 'moomoo') {
+    if (activeTab === 'investments') {
       return [
         tr(
-          'Analiza nuestro portafolio en Moomoo: concentración, rendimiento por dividendos y próximos pasos',
-          'Analyze our Moomoo portfolio: concentration, dividend yield, and next steps'
+          'Analiza nuestro portafolio de inversiones: concentración, rendimiento por dividendos y próximos pasos',
+          'Analyze our investment portfolio: concentration, dividend yield, and next steps'
         ),
         tr(
           '¿Cuánto dividendo anual estimamos generar y cómo reinvertirlo de forma inteligente?',
@@ -218,7 +218,7 @@ export function AiAgentDrawer({
       ? tr('Presupuestos', 'Budgets')
       : activeTab === 'accounts'
       ? tr('Cuentas Bancarias', 'Bank Accounts')
-      : activeTab === 'moomoo'
+      : activeTab === 'investments'
       ? tr('Inversiones', 'Investments')
       : tr('Resumen', 'Overview');
 
@@ -240,7 +240,7 @@ export function AiAgentDrawer({
     if (activeProfile !== 'all' && state.profiles.some((p) => p.id === activeProfile)) {
       return activeProfile;
     }
-    return state.profiles[0]?.id || 'abdiel';
+    return state.profiles[0]?.id || '';
   };
 
   // The model can hallucinate ids/currencies: only accept values that exist in the app.
@@ -341,22 +341,22 @@ export function AiAgentDrawer({
     if (action.actionType === 'create_account') {
       const owner = resolveActionOwner(action.owner);
       const validKinds: AccountKind[] = [
-        'commbank',
-        'goalsaver',
-        'revolut',
-        'wise',
-        'moomoo',
-        'cash',
-        'other',
+        'transaccional',
+        'ahorro',
+        'inversion',
+        'tarjeta_credito',
+        'efectivo',
+        'otra',
       ];
       const kind: AccountKind = validKinds.includes(action.accountKind as AccountKind)
         ? (action.accountKind as AccountKind)
-        : 'other';
+        : 'otra';
 
       onAddAccount({
         name: action.description || action.title || tr('Cuenta nueva', 'New account'),
         owner,
         kind,
+        institution: action.institution?.trim() || undefined,
         currency: validCurrency(action.currency, state.displayCurrency),
         initialBalance: Number(action.amount) || 0,
         notes: action.notes || action.detail || undefined,
@@ -367,7 +367,7 @@ export function AiAgentDrawer({
 
     if (action.actionType === 'delete_account') {
       // Only an exact id, or a name that matches exactly ONE account. Fuzzy matching could delete
-      // another person's account (e.g. "CommBank" matched the first CommBank of any profile).
+      // another person's account (a bank name matched the first account of any profile).
       const needle = (action.description || '').trim().toLowerCase();
       const byName = needle ? state.accounts.filter((a) => a.name.trim().toLowerCase() === needle) : [];
       const targetAcc =
@@ -483,8 +483,8 @@ export function AiAgentDrawer({
                 </p>
                 <p>
                   {tr(
-                    'Analiza tus ingresos, gastos, presupuestos, cuentas GoalSaver y portafolio Moomoo en tiempo real. También puede proponerte acciones aplicables en 1 clic.',
-                    'Analyzes your income, expenses, budgets, GoalSaver accounts, and Moomoo portfolio in real time — and proposes 1-click actions you can confirm.'
+                    'Analiza tus ingresos, gastos, presupuestos, cuentas, ahorro e inversiones del mes. También puede proponerte acciones aplicables en 1 clic.',
+                    'Analyzes your income, expenses, budgets, accounts, savings and investments for the month, and proposes 1-click actions you can confirm.'
                   )}
                 </p>
               </div>
@@ -602,8 +602,8 @@ export function AiAgentDrawer({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={tr(
-              'Pregunta sobre gastos, presupuestos, GoalSaver o Moomoo...',
-              'Ask about expenses, budgets, GoalSaver, or Moomoo...'
+              'Pregunta sobre gastos, presupuestos, ahorro o inversiones...',
+              'Ask about expenses, budgets, savings, or investments...'
             )}
             className="flex-1 px-3.5 py-2 bg-white dark:bg-[#031725] border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg text-sm text-[#031725] dark:text-[#DAEAFF] placeholder:text-[#7FA6D6] focus:outline-none focus:ring-2 focus:ring-[#499BED]"
           />

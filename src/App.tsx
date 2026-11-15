@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { Globe, HardDriveDownload, Moon, Plus, RotateCcw, Sparkles, Sun, Upload, Users, X } from 'lucide-react';
-import { AccountsGoalSaverView } from './components/AccountsGoalSaverView';
+import { AccountsView } from './components/AccountsView';
 import { AiAgentDrawer } from './components/AiAgentDrawer';
 import { AiReclassifyModal } from './components/AiReclassifyModal';
 import { BackupModal } from './components/BackupModal';
 import { BudgetsView } from './components/BudgetsView';
 import { CsvImportModal } from './components/CsvImportModal';
 import { DashboardView } from './components/DashboardView';
-import { MoomooInvestmentsView } from './components/MoomooInvestmentsView';
+import { InvestmentsView } from './components/InvestmentsView';
+import { AppPasswordModal } from './components/AppPasswordModal';
 import { ProfilesModal } from './components/ProfilesModal';
 import { ResetZeroModal } from './components/ResetZeroModal';
 import { TransactionModal } from './components/TransactionModal';
@@ -15,9 +16,12 @@ import { TransactionsView } from './components/TransactionsView';
 import { useUiPreferences } from './contexts/UiPreferencesContext';
 import { useFinanceStore } from './hooks/useFinanceStore';
 import type { ProfileFilter, Transaction } from './types/finance';
+import { AUTH_REQUIRED_EVENT, checkAiAuth, getStoredAppPassword } from './utils/aiClient';
 import { getCurrentMonthKey, type CsvPreset } from './utils/formatters';
 
-type ActiveTab = 'dashboard' | 'transactions' | 'budgets' | 'accounts' | 'moomoo';
+type ActiveTab = 'dashboard' | 'transactions' | 'budgets' | 'accounts' | 'investments';
+
+const BACKUP_REMINDER_DAYS = 7;
 
 export default function App() {
   const {
@@ -36,11 +40,14 @@ export default function App() {
     deleteAccount,
     upsertBudget,
     deleteBudget,
-    updateGoalSaver,
-    addMoomooHolding,
-    updateMoomooHolding,
-    deleteMoomooHolding,
-    importMoomooHoldingsBatch,
+    addSavingsConfig,
+    updateSavingsConfig,
+    deleteSavingsConfig,
+    addInvestment,
+    updateInvestment,
+    deleteInvestment,
+    importInvestmentTradesBatch,
+    markBackupDone,
     toggleFixedExpensePaid,
     addFixedExpense,
     deleteFixedExpense,
@@ -70,6 +77,35 @@ export default function App() {
   const [isProfilesModalOpen, setIsProfilesModalOpen] = useState(false);
   const [isResetZeroOpen, setIsResetZeroOpen] = useState(false);
   const [hideSampleNotice, setHideSampleNotice] = useState(false);
+  const [hideBackupReminder, setHideBackupReminder] = useState(false);
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+
+  // AI password: ask once at startup when the server requires it and none is stored (or it's wrong),
+  // and again whenever an AI call is rejected with 401.
+  useEffect(() => {
+    let cancelled = false;
+    checkAiAuth(getStoredAppPassword())
+      .then((res) => {
+        if (!cancelled && res.required && !res.valid) setIsPasswordModalOpen(true);
+      })
+      .catch(() => {
+        /* server unreachable: AI calls will report their own error */
+      });
+    const onAuthRequired = () => setIsPasswordModalOpen(true);
+    window.addEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+    };
+  }, []);
+
+  const daysSinceBackup = state.lastBackupAt
+    ? Math.floor((Date.now() - new Date(state.lastBackupAt).getTime()) / (24 * 3600 * 1000))
+    : null;
+  const showBackupReminder =
+    !state.isSampleData &&
+    !hideBackupReminder &&
+    (daysSinceBackup === null || daysSinceBackup >= BACKUP_REMINDER_DAYS);
 
   useEffect(() => {
     if (
@@ -113,7 +149,7 @@ export default function App() {
     { id: 'transactions', label: tr('Movimientos', 'Transactions') },
     { id: 'budgets', label: tr('Presupuestos', 'Budgets') },
     { id: 'accounts', label: tr('Cuentas Bancarias', 'Bank Accounts') },
-    { id: 'moomoo', label: tr('Inversiones', 'Investments') },
+    { id: 'investments', label: tr('Inversiones', 'Investments') },
   ];
 
   return (
@@ -312,8 +348,8 @@ export default function App() {
               onClick={() => setIsResetZeroOpen(true)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700 dark:text-red-300 bg-white dark:bg-[#022E5B]/80 border border-red-200 dark:border-red-800/70 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors whitespace-nowrap shrink-0"
               title={tr(
-                'Volver a $0 saldos por cuenta, Moomoo y movimientos',
-                'Reset account balances, Moomoo, and transactions to $0'
+                'Volver a $0 saldos por cuenta, inversiones y movimientos',
+                'Reset account balances, investments, and transactions to $0'
               )}
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -345,16 +381,52 @@ export default function App() {
             )}
           </div>
         )}
+        {showBackupReminder && (
+          <div
+            role="status"
+            className="bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-100 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 text-xs sm:text-sm"
+          >
+            <span>
+              {daysSinceBackup === null
+                ? tr(
+                    'Tus datos viven solo en este navegador y todavía no descargaste ningún respaldo.',
+                    'Your data lives only in this browser and you have not downloaded a backup yet.'
+                  )
+                : tr(
+                    `Han pasado ${daysSinceBackup} días desde tu último respaldo. Tus datos viven solo en este navegador.`,
+                    `It has been ${daysSinceBackup} days since your last backup. Your data lives only in this browser.`
+                  )}
+            </span>
+            <div className="flex items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsBackupModalOpen(true)}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg"
+              >
+                {tr('Descargar respaldo', 'Download backup')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setHideBackupReminder(true)}
+                className="p-1 text-amber-700 dark:text-amber-300 hover:text-amber-900"
+                aria-label={tr('Recordar más tarde', 'Remind me later')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {state.isSampleData && !hideSampleNotice && (
           <div className="bg-[#022E5B] dark:bg-[#062644] border border-[#022E5B] dark:border-[#499BED]/30 text-[#DAEAFF] rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
             <p className="text-xs sm:text-sm">
               {tr(
                 `Estás viendo datos de ejemplo (${state.profiles
                   .map((p) => p.name)
-                  .join(', ')}) para explorar los gráficos, GoalSaver y Moomoo. Cuando quieras cargar tus datos reales, limpia los ejemplos en 1 clic.`,
+                  .join(', ')}) para explorar los gráficos, el ahorro y las inversiones. Cuando quieras cargar tus datos reales, limpia los ejemplos en 1 clic.`,
                 `You are viewing sample data (${state.profiles
                   .map((p) => p.name)
-                  .join(', ')}) to explore the charts, GoalSaver, and Moomoo. When you are ready for your real numbers, clear the samples in 1 click.`
+                  .join(', ')}) to explore the charts, savings, and investments. When you are ready for your real numbers, clear the samples in 1 click.`
               )}
             </p>
             <div className="flex items-center gap-3 shrink-0">
@@ -425,28 +497,30 @@ export default function App() {
         )}
 
         {activeTab === 'accounts' && (
-          <AccountsGoalSaverView
+          <AccountsView
             state={state}
             activeProfile={activeProfile}
             onAddAccount={addAccount}
             onUpdateAccount={updateAccount}
             onDeleteAccount={deleteAccount}
-            onUpdateGoalSaver={updateGoalSaver}
+            onAddSavingsConfig={addSavingsConfig}
+            onUpdateSavingsConfig={updateSavingsConfig}
+            onDeleteSavingsConfig={deleteSavingsConfig}
             onResetToZero={resetToZero}
-            onOpenImport={(preset) => handleOpenImport(preset || 'commbank')}
+            onOpenImport={(preset) => handleOpenImport(preset || 'auto')}
             onAskAi={handleOpenAi}
           />
         )}
 
-        {activeTab === 'moomoo' && (
-          <MoomooInvestmentsView
+        {activeTab === 'investments' && (
+          <InvestmentsView
             state={state}
             activeProfile={activeProfile}
-            onAddHolding={addMoomooHolding}
-            onUpdateHolding={updateMoomooHolding}
-            onDeleteHolding={deleteMoomooHolding}
+            onAddHolding={addInvestment}
+            onUpdateHolding={updateInvestment}
+            onDeleteHolding={deleteInvestment}
             onResetToZero={resetToZero}
-            onOpenCsvImport={() => handleOpenImport('moomoo')}
+            onOpenCsvImport={() => handleOpenImport('auto')}
             onAskAi={handleOpenAi}
           />
         )}
@@ -497,8 +571,9 @@ export default function App() {
         activeProfile={activeProfile}
         initialPreset={importModalPreset}
         onImportTransactions={importTransactionsBatch}
-        onImportMoomooTrades={importMoomooHoldingsBatch}
-        onUpdateGoalSaver={updateGoalSaver}
+        savingsConfigs={state.savingsConfigs}
+        onImportInvestmentTrades={importInvestmentTradesBatch}
+        onUpdateSavingsConfig={updateSavingsConfig}
         onAddAccount={addAccount}
       />
 
@@ -507,6 +582,7 @@ export default function App() {
         onClose={() => setIsBackupModalOpen(false)}
         state={state}
         onRestoreState={restoreFullState}
+        onBackupDownloaded={markBackupDone}
         onClearToBlank={clearToBlank}
         onOpenResetZero={() => setIsResetZeroOpen(true)}
         onLoadSampleData={loadSampleData}
@@ -542,6 +618,12 @@ export default function App() {
         activeProfile={activeProfile}
         selectedMonth={selectedMonth}
         onApplyBatch={updateTransactionsBatch}
+      />
+
+      <AppPasswordModal
+        isOpen={isPasswordModalOpen}
+        onClose={() => setIsPasswordModalOpen(false)}
+        onAuthenticated={() => setIsPasswordModalOpen(false)}
       />
 
       <AiAgentDrawer

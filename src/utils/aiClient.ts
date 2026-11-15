@@ -13,6 +13,7 @@ import type {
 import {
   CURRENCY_META,
   computeAccountBalances,
+  getSavingsBalance,
   convertCurrency,
   getMonthKey,
   getTodayISO,
@@ -23,7 +24,7 @@ import {
 
 const VALID_TX_TYPES: TransactionType[] = ['expense', 'income', 'transfer'];
 const VALID_PRESETS: Array<Exclude<CsvPreset, 'auto'>> = ['commbank', 'goalsaver', 'revolut', 'moomoo', 'generic'];
-const VALID_ACCOUNT_KINDS: AccountKind[] = ['commbank', 'goalsaver', 'revolut', 'moomoo', 'wise', 'cash', 'other'];
+const VALID_ACCOUNT_KINDS: AccountKind[] = ['transaccional', 'ahorro', 'inversion', 'tarjeta_credito', 'efectivo', 'otra'];
 
 function isCurrency(value: unknown): value is CurrencyCode {
   return typeof value === 'string' && value.toUpperCase() in CURRENCY_META;
@@ -53,8 +54,10 @@ function sanitizeDocumentAnalysis(
     const type = asTxType(tx.type) || 'expense';
     const description = String(tx.description || '').trim();
     const categoryId = catIds.has(tx.categoryId) ? tx.categoryId : guessCategoryId(description, type);
-    const moomooAction = ['BUY', 'SELL', 'DIVIDEND'].includes(String(tx.moomooAction || '').toUpperCase())
-      ? (String(tx.moomooAction).toUpperCase() as 'BUY' | 'SELL' | 'DIVIDEND')
+    // The server calls it "tradeAction"; older responses used "moomooAction".
+    const rawAction = String(tx.tradeAction || tx.moomooAction || '').toUpperCase();
+    const moomooAction = ['BUY', 'SELL', 'DIVIDEND'].includes(rawAction)
+      ? (rawAction as 'BUY' | 'SELL' | 'DIVIDEND')
       : '';
     const direction = tx.direction === 'in' || tx.direction === 'out' ? tx.direction : '';
     transactions.push({
@@ -86,7 +89,8 @@ function sanitizeDocumentAnalysis(
     suggestedNewAccount: suggested
       ? {
           ...suggested,
-          kind: VALID_ACCOUNT_KINDS.includes(suggested.kind) ? suggested.kind : 'other',
+          kind: VALID_ACCOUNT_KINDS.includes(suggested.kind) ? suggested.kind : 'otra',
+          institution: String(suggested.institution || '').trim() || undefined,
           currency: isCurrency(suggested.currency)
             ? (suggested.currency.toUpperCase() as CurrencyCode)
             : detectedCurrency,
@@ -109,6 +113,7 @@ export interface AiExtractedTransaction {
   classificationNote?: string;
   ticker?: string;
   moomooAction?: 'BUY' | 'SELL' | 'DIVIDEND' | '';
+  tradeAction?: string;
   shares?: number;
   price?: number;
   assetType?: 'ETF' | 'Acción' | 'Fondo' | '';
@@ -119,6 +124,7 @@ export interface AiSuggestedNewAccount {
   name: string;
   owner: ProfileId;
   kind: AccountKind;
+  institution?: string;
   currency: CurrencyCode;
   notes: string;
 }
@@ -180,6 +186,7 @@ export interface AiProposedAction {
   dueDay?: number;
   accountId?: string;
   accountKind?: AccountKind;
+  institution?: string;
   notes?: string;
   date?: string;
 }
@@ -190,18 +197,60 @@ export interface AiAssistantResponse {
   proposedActions: AiProposedAction[];
 }
 
+const APP_PASSWORD_STORAGE_KEY = 'midas_app_password';
+
+export function getStoredAppPassword(): string {
+  try {
+    return window.localStorage.getItem(APP_PASSWORD_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function storeAppPassword(password: string) {
+  try {
+    if (password) window.localStorage.setItem(APP_PASSWORD_STORAGE_KEY, password);
+    else window.localStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Fired when the server rejects the AI password so the app can ask for it again. */
+export const AUTH_REQUIRED_EVENT = 'midas:auth-required';
+
+export class AiAuthError extends Error {}
+
 async function postAiJson<T>(endpoint: string, body: unknown): Promise<T> {
   const res = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-App-Password': getStoredAppPassword() },
     body: JSON.stringify(body),
   });
 
   const payload = (await res.json().catch(() => ({}))) as { error?: string } & T;
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+    throw new AiAuthError(payload.error || 'Se necesita la contraseña de la app para usar la IA.');
+  }
+  if (res.status === 413) {
+    throw new Error('El archivo es demasiado grande para analizarlo con IA (máximo ~7 MB).');
+  }
   if (!res.ok) {
     throw new Error(payload.error || `Error ${res.status}`);
   }
   return payload;
+}
+
+/** Asks the server whether AI calls need a password and whether the stored one is valid. */
+export async function checkAiAuth(password: string): Promise<{ required: boolean; valid: boolean }> {
+  const res = await fetch('/api/auth/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-App-Password': password },
+    body: '{}',
+  });
+  const payload = (await res.json().catch(() => ({}))) as { required?: boolean; valid?: boolean };
+  return { required: Boolean(payload.required), valid: Boolean(payload.valid) };
 }
 
 export function fileToBase64(file: Blob): Promise<string> {
@@ -244,6 +293,7 @@ export async function analyzeDocumentWithAi(params: {
       name: a.name,
       owner: a.owner,
       kind: a.kind,
+      institution: a.institution || '',
       currency: a.currency,
       notes: a.notes || '',
     })),
@@ -337,23 +387,29 @@ export async function parseQuickEntryWithAi(params: {
   });
 }
 
+const SNAPSHOT_MAX_MONTH_TX = 80;
+const SNAPSHOT_MAX_UNCATEGORIZED = 20;
+export const ASSISTANT_MAX_HISTORY = 10;
+
+/**
+ * Compact context for the assistant: only what it needs to answer about the selected month
+ * (summary, totals per category, budgets, balances and that month's movements, capped) instead of
+ * the full history. Keeps requests cheaper and sends less personal data.
+ */
 export function buildFinancialSnapshot(
   state: FinanceState,
   activeProfile: ProfileFilter,
   selectedMonth: string
 ) {
   const dc = state.displayCurrency;
-  const profileTxs =
-    activeProfile === 'all'
-      ? state.transactions
-      : state.transactions.filter((t) => t.owner === activeProfile);
-
+  const inScope = (owner: string) => activeProfile === 'all' || owner === activeProfile;
+  const profileTxs = state.transactions.filter((t) => inScope(t.owner));
   const monthTxs = profileTxs.filter((t) => getMonthKey(t.date) === selectedMonth);
+  const round = (n: number) => Number(n.toFixed(2));
 
   let monthIncome = 0;
   let monthExpenses = 0;
   const spentByCategory = new Map<string, number>();
-
   for (const tx of monthTxs) {
     const val = convertCurrency(tx.amount, tx.currency, dc, state.exchangeRates);
     if (tx.type === 'income') monthIncome += val;
@@ -362,57 +418,105 @@ export function buildFinancialSnapshot(
       spentByCategory.set(tx.categoryId, (spentByCategory.get(tx.categoryId) || 0) + val);
     }
   }
-
   const netSavings = monthIncome - monthExpenses;
-  const savingsRatePct = monthIncome > 0 ? Number(((netSavings / monthIncome) * 100).toFixed(1)) : 0;
 
   const accountBalances = computeAccountBalances(state.accounts, state.transactions, state.exchangeRates);
+  const visibleAccounts = state.accounts.filter((a) => inScope(a.owner));
+
+  // This month's movements, biggest first, capped.
+  const monthMovements = [...monthTxs]
+    .sort(
+      (a, b) =>
+        convertCurrency(b.amount, b.currency, dc, state.exchangeRates) -
+        convertCurrency(a.amount, a.currency, dc, state.exchangeRates)
+    )
+    .slice(0, SNAPSHOT_MAX_MONTH_TX);
+  const monthIds = new Set(monthMovements.map((t) => t.id));
+  // A few recent movements in generic categories (outside the month) so the agent can propose reclassifications.
+  const uncategorized = profileTxs
+    .filter((t) => !monthIds.has(t.id) && (t.categoryId === 'cat_otros_gastos' || t.categoryId === 'cat_otros_ingresos'))
+    .slice(0, SNAPSHOT_MAX_UNCATEGORIZED);
+
+  const txRow = (t: Transaction) => ({
+    id: t.id,
+    owner: t.owner,
+    type: t.type,
+    date: t.date,
+    amount: t.amount,
+    currency: t.currency,
+    categoryId: t.categoryId,
+    accountId: t.accountId,
+    description: t.description.slice(0, 80),
+  });
 
   const paidMap = state.fixedExpensePaidByMonth[selectedMonth] || {};
+
+  // Investments aggregated per ticker (no per-lot detail).
+  const investments = state.investments
+    .filter((h) => inScope(h.owner))
+    .map((h) => ({
+      owner: h.owner,
+      accountId: h.accountId || '',
+      ticker: h.ticker,
+      assetType: h.assetType,
+      marketValue: round(h.shares * h.currentPricePerShare),
+      costBasis: round(h.shares * h.avgCostPerShare),
+      dividendYieldAnnual: h.dividendYieldAnnual,
+      currency: h.currency,
+    }));
 
   return {
     displayCurrency: dc,
     selectedMonth,
     activeProfile,
-    profiles: state.profiles.map((p) => ({
-      id: p.id,
-      name: p.name,
-      role: p.role || '',
-      country: p.country || '',
-    })),
+    profiles: state.profiles.map((p) => ({ id: p.id, name: p.name })),
     monthSummary: {
-      income: Number(monthIncome.toFixed(2)),
-      expenses: Number(monthExpenses.toFixed(2)),
-      netSavings: Number(netSavings.toFixed(2)),
-      savingsRatePct,
+      income: round(monthIncome),
+      expenses: round(monthExpenses),
+      netSavings: round(netSavings),
+      savingsRatePct: monthIncome > 0 ? Number(((netSavings / monthIncome) * 100).toFixed(1)) : 0,
+      movementCount: monthTxs.length,
+      movementsIncluded: monthMovements.length,
     },
     categories: state.categories.map((c) => ({
       id: c.id,
       name: c.name,
       type: c.type,
-      spentThisMonth: Number((spentByCategory.get(c.id) || 0).toFixed(2)),
+      ...(spentByCategory.get(c.id) ? { spentThisMonth: round(spentByCategory.get(c.id) || 0) } : {}),
     })),
-    budgets: state.budgets.map((b) => ({
-      id: b.id,
-      categoryId: b.categoryId,
-      owner: b.owner,
-      monthlyLimit: b.monthlyLimit,
-      currency: b.currency,
-      spentThisMonth: Number((spentByCategory.get(b.categoryId) || 0).toFixed(2)),
-    })),
-    accounts: state.accounts
-      .filter((a) => activeProfile === 'all' || a.owner === activeProfile)
-      .map((a) => ({
-        id: a.id,
-        name: a.name,
-        owner: a.owner,
-        kind: a.kind,
-        currency: a.currency,
-        balance: Number((accountBalances.get(a.id) ?? a.initialBalance).toFixed(2)),
+    budgets: state.budgets
+      .filter((b) => b.owner === 'all' || inScope(b.owner))
+      .map((b) => ({
+        id: b.id,
+        categoryId: b.categoryId,
+        owner: b.owner,
+        monthlyLimit: b.monthlyLimit,
+        currency: b.currency,
+        spentThisMonth: round(spentByCategory.get(b.categoryId) || 0),
       })),
-    goalSavers: state.goalSavers,
+    accounts: visibleAccounts.map((a) => ({
+      id: a.id,
+      name: a.name,
+      owner: a.owner,
+      kind: a.kind,
+      currency: a.currency,
+      balance: round(accountBalances.get(a.id) ?? a.initialBalance),
+    })),
+    savingsAccounts: state.savingsConfigs
+      .filter((c) => inScope(c.owner))
+      .map((c) => ({
+        name: c.name,
+        owner: c.owner,
+        accountId: c.accountId || '',
+        balance: round(getSavingsBalance(c, accountBalances, state.accounts, state.exchangeRates)),
+        monthlyContribution: c.monthlyContribution,
+        baseRateAnnual: c.baseRateAnnual,
+        bonusRateAnnual: c.bonusRateAnnual,
+        currency: c.currency,
+      })),
+    investments,
     fixedExpenses: state.fixedExpenses
-      .filter((f) => activeProfile === 'all' || f.owner === activeProfile)
+      .filter((f) => inScope(f.owner))
       .map((f) => ({
         id: f.id,
         name: f.name,
@@ -422,30 +526,8 @@ export function buildFinancialSnapshot(
         dueDay: f.dueDay,
         isPaid: Boolean(paidMap[f.id]),
       })),
-    moomooHoldings: state.moomooHoldings
-      .filter((h) => activeProfile === 'all' || h.owner === activeProfile)
-      .map((h) => ({
-        owner: h.owner,
-        ticker: h.ticker,
-        name: h.name,
-        assetType: h.assetType,
-        shares: h.shares,
-        avgCost: h.avgCostPerShare,
-        currentPrice: h.currentPricePerShare,
-        dividendYieldAnnual: h.dividendYieldAnnual,
-        currency: h.currency,
-      })),
-    recentAndUncategorizedTransactions: profileTxs.slice(0, 35).map((t) => ({
-      id: t.id,
-      owner: t.owner,
-      type: t.type,
-      date: t.date,
-      amount: t.amount,
-      currency: t.currency,
-      categoryId: t.categoryId,
-      accountId: t.accountId,
-      description: t.description,
-    })),
+    monthTransactions: monthMovements.map(txRow),
+    recentUncategorizedTransactions: uncategorized.map(txRow),
   };
 }
 
@@ -458,7 +540,8 @@ export async function askFinancialAssistant(params: {
   state: FinanceState;
 }): Promise<AiAssistantResponse> {
   return postAiJson<AiAssistantResponse>('/api/ai/assistant', {
-    messages: params.messages,
+    // Only the most recent turns are re-sent.
+    messages: params.messages.slice(-ASSISTANT_MAX_HISTORY),
     activeTab: params.activeTab,
     activeProfile: params.activeProfile,
     selectedMonth: params.selectedMonth,

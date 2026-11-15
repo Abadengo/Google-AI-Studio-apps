@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import express, { type Request, type Response } from 'express';
+import crypto from 'crypto';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -114,7 +115,77 @@ async function startServer() {
   const app = express();
   const port = Number(process.env.PORT || 3000);
 
-  app.use(express.json({ limit: '25mb' }));
+  // Cloud Run / proxies: trust the first proxy so req.ip is the real client address.
+  app.set('trust proxy', 1);
+
+  // A typical PDF statement (≈7 MB) is ≈10 MB once base64-encoded in JSON.
+  app.use(express.json({ limit: '10mb' }));
+
+  // --- Protection for the AI endpoints (they spend the Gemini key) ---
+  const appPassword = process.env.APP_PASSWORD || '';
+  if (!appPassword) {
+    console.warn(
+      isProduction
+        ? 'APP_PASSWORD no está configurada: las funciones de IA quedan DESACTIVADAS en producción.'
+        : 'APP_PASSWORD no está configurada: las funciones de IA no piden contraseña (solo desarrollo local).'
+    );
+  }
+
+  const passwordMatches = (provided: unknown): boolean => {
+    if (!appPassword || typeof provided !== 'string') return false;
+    const a = crypto.createHash('sha256').update(provided).digest();
+    const b = crypto.createHash('sha256').update(appPassword).digest();
+    return crypto.timingSafeEqual(a, b);
+  };
+
+  // Simple in-memory fixed-window rate limit per client IP (good enough for a single small instance).
+  const AI_RATE_LIMIT_PER_MINUTE = Number(process.env.AI_RATE_LIMIT_PER_MINUTE) || 20;
+  const rateWindows = new Map<string, { windowStart: number; count: number }>();
+  const aiRateLimit = (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    const key = req.ip || 'unknown';
+    const entry = rateWindows.get(key);
+    if (!entry || now - entry.windowStart >= 60_000) {
+      rateWindows.set(key, { windowStart: now, count: 1 });
+    } else if (entry.count >= AI_RATE_LIMIT_PER_MINUTE) {
+      const retryAfter = Math.ceil((entry.windowStart + 60_000 - now) / 1000);
+      res.setHeader('Retry-After', String(retryAfter));
+      res.status(429).json({ error: `Demasiadas solicitudes de IA. Espera ${retryAfter} s e inténtalo de nuevo.` });
+      return;
+    } else {
+      entry.count += 1;
+    }
+    if (rateWindows.size > 5000) {
+      for (const [k, v] of rateWindows) if (now - v.windowStart >= 60_000) rateWindows.delete(k);
+    }
+    next();
+  };
+
+  const requireAppPassword = (req: Request, res: Response, next: NextFunction) => {
+    if (!appPassword) {
+      if (isProduction) {
+        res.status(503).json({ error: 'La IA está desactivada: configura APP_PASSWORD en el servidor.' });
+        return;
+      }
+      next();
+      return;
+    }
+    if (!passwordMatches(req.header('x-app-password'))) {
+      res.status(401).json({ error: 'Contraseña de la app incorrecta o ausente.' });
+      return;
+    }
+    next();
+  };
+
+  // Rate limit first (also throttles password guessing), then the password check.
+  app.use('/api/ai', aiRateLimit, requireAppPassword);
+  app.use('/api/auth', aiRateLimit);
+
+  // Lets the client know whether a password is needed and whether the stored one is valid.
+  app.post('/api/auth/check', (req: Request, res: Response) => {
+    const required = Boolean(appPassword) || isProduction;
+    res.json({ required, valid: appPassword ? passwordMatches(req.header('x-app-password')) : !isProduction });
+  });
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ ok: true, model: MODEL_NAME, configured: Boolean(process.env.GEMINI_API_KEY) });
@@ -144,6 +215,7 @@ async function startServer() {
           name: string;
           owner: string;
           kind: string;
+          institution?: string;
           currency: string;
           notes?: string;
         }>;
@@ -152,14 +224,13 @@ async function startServer() {
         lang: 'es' | 'en';
       };
 
+      // Profiles always come from the app; never assume who the household is.
+      if (!Array.isArray(profiles) || profiles.length === 0) {
+        res.status(400).json({ error: 'No se recibieron perfiles. Crea al menos un perfil en la app antes de usar la IA.' });
+        return;
+      }
       const ai = getAiClient();
-      const effectiveProfiles =
-        profiles.length > 0
-          ? profiles
-          : [
-              { id: 'abdiel', name: 'Abdiel' },
-              { id: 'lara', name: 'Lara' },
-            ];
+      const effectiveProfiles = profiles;
       const fallbackOwner =
         activeProfile !== 'all' && effectiveProfiles.some((p) => p.id === activeProfile)
           ? activeProfile
@@ -180,22 +251,22 @@ ${JSON.stringify(categories)}
 
 INSTRUCTIONS:
 1. Detect who owns this statement using one exact "id" from the household profiles list above (from account holder name, email, filename, account numbers, or context clues). If unsure, use "${fallbackOwner}" with confidence="fallback".
-2. Detect bank/broker preset: "commbank", "goalsaver", "revolut", "moomoo", or "generic".
+2. Detect the FILE FORMAT "preset" (how the document is laid out, not the account type): "commbank" | "goalsaver" | "revolut" | "moomoo" | "generic". Use "generic" when it doesn't match a known layout.
 3. Check if the document belongs to one of the user's EXISTING accounts above:
-   - If YES (same bank/institution, owner, and currency match an existing account), set "matchedExistingAccount": true, "targetAccountId" to that exact account id, and "suggestedNewAccount.shouldCreate": false.
-   - If NO (for example: an external bank like ING, ANZ, NAB, Westpac, Up Bank, Macquarie, HSBC, Amex, PayPal, or a bank/currency/profile combination that is NOT in the existing accounts list), set "matchedExistingAccount": false, "targetAccountId": "", and fill "suggestedNewAccount" with shouldCreate: true, a clean descriptive "name" (e.g., "ING Everyday (AUD)", "ANZ Savings (AUD)"), valid "owner" ID, "kind" ("commbank" | "goalsaver" | "revolut" | "moomoo" | "wise" | "cash" | "other"), "currency", and short "notes".
+   - If YES (same institution, owner, account type and currency match an existing account), set "matchedExistingAccount": true, "targetAccountId" to that exact account id, and "suggestedNewAccount.shouldCreate": false.
+   - If NO (for example: an external bank like ING, ANZ, NAB, Westpac, Up Bank, Macquarie, HSBC, Amex, PayPal, or a bank/currency/profile combination that is NOT in the existing accounts list), set "matchedExistingAccount": false, "targetAccountId": "", and fill "suggestedNewAccount" with shouldCreate: true, a short descriptive "name" (e.g., "Everyday account (AUD)", "Savings (AUD)"), valid "owner" ID, generic account type "kind" ("transaccional" | "ahorro" | "inversion" | "tarjeta_credito" | "efectivo" | "otra"), "institution" (bank/broker name printed on the document, or ""), "currency", and short "notes".
 4. Detect primary currency ("AUD", "USD", "EUR", "ARS", "MXN", "CLP") and closingBalance if printed (0 if not found).
 5. Extract ALL real financial movements (skip running balance lines, headers, subtotals, opening/closing balance summary lines).
 6. For each movement:
    - Normalize "date" to YYYY-MM-DD.
    - Clean "description" to a concise readable merchant/concept name.
    - Determine "type":
-     * "transfer" ONLY when moving money between the user's own accounts (e.g., Transfer to Revolut, Transfer to/from GoalSaver, Internal Transfer) and set categoryId to "cat_transfer" if available.
-   - Set "direction" to "in" when money ENTERS this statement's account (deposits, credits, incoming transfers) and "out" when it LEAVES it (debits, purchases, outgoing transfers).
+     * "transfer" ONLY when moving money between the user's own accounts (e.g., transfer to the savings account, transfer from the everyday account) and set categoryId to "cat_transfer" if available.
      * "income" for salary, interest, dividends, refunds, deposits.
      * "expense" for purchases, bills, subscriptions, stock/ETF BUYs.
+   - Set "direction" to "in" when money ENTERS this statement's account (deposits, credits, incoming transfers) and "out" when it LEAVES it (debits, purchases, outgoing transfers).
    - Always make "amount" a positive number (> 0).
-   - For Moomoo broker rows, populate "ticker" (e.g., VOO, VAS, AAPL), "moomooAction" ("BUY" | "SELL" | "DIVIDEND"), "shares", "price", and "assetType" ("ETF" | "Acción" | "Fondo"). For non-Moomoo rows, leave ticker and moomooAction empty strings "".
+   - For broker / investment rows, populate "ticker" (e.g., VOO, AAPL), "tradeAction" ("BUY" | "SELL" | "DIVIDEND"), "shares", "price", and "assetType" ("ETF" | "Acción" | "Fondo"). For other rows, leave ticker and tradeAction as empty strings "".
    - Assign the most accurate "categoryId" from the provided categories list (avoid "cat_otros_gastos" unless truly unknown).
 ${textContent ? `\nEXTRACTED TEXT / CSV CONTENT:\n${textContent.slice(0, 48000)}` : ''}`;
 
@@ -224,7 +295,7 @@ ${textContent ? `\nEXTRACTED TEXT / CSV CONTENT:\n${textContent.slice(0, 48000)}
                 confidence: { type: Type.STRING, description: '"high" | "medium" | "fallback"' },
                 preset: {
                   type: Type.STRING,
-                  description: '"commbank" | "goalsaver" | "revolut" | "moomoo" | "generic"',
+                  description: 'File format: "commbank" | "goalsaver" | "revolut" | "moomoo" | "generic"',
                 },
                 targetAccountId: { type: Type.STRING },
                 matchedExistingAccount: { type: Type.BOOLEAN },
@@ -234,9 +305,10 @@ ${textContent ? `\nEXTRACTED TEXT / CSV CONTENT:\n${textContent.slice(0, 48000)}
                     shouldCreate: { type: Type.BOOLEAN },
                     name: { type: Type.STRING },
                     owner: { type: Type.STRING },
+                    institution: { type: Type.STRING },
                     kind: {
                       type: Type.STRING,
-                      description: '"commbank" | "goalsaver" | "revolut" | "moomoo" | "wise" | "cash" | "other"',
+                      description: 'Generic account type: "transaccional" | "ahorro" | "inversion" | "tarjeta_credito" | "efectivo" | "otra"',
                     },
                     currency: { type: Type.STRING },
                     notes: { type: Type.STRING },
@@ -259,7 +331,7 @@ ${textContent ? `\nEXTRACTED TEXT / CSV CONTENT:\n${textContent.slice(0, 48000)}
                       categoryId: { type: Type.STRING },
                       classificationNote: { type: Type.STRING },
                       ticker: { type: Type.STRING },
-                      moomooAction: { type: Type.STRING },
+                      tradeAction: { type: Type.STRING },
                       shares: { type: Type.NUMBER },
                       price: { type: Type.NUMBER },
                       assetType: { type: Type.STRING },
@@ -322,7 +394,7 @@ ${textContent ? `\nEXTRACTED TEXT / CSV CONTENT:\n${textContent.slice(0, 48000)}
       const prompt = `You are the Midas Tracker Post-Import Classification Agent.
 Review these already-recorded transactions and propose ONLY meaningful improvements (a posteriori classification) when:
 1. A transaction is in a generic category (e.g. "cat_otros_gastos", "cat_otros_ingresos") or wrong category given its merchant/description.
-2. A transaction has the wrong type (for instance, an internal transfer like "Transfer to Revolut", "Transfer from CommBank", "Transfer to GoalSaver" currently tagged as "expense" or "income" should be type="transfer" and categoryId="cat_transfer").
+2. A transaction has the wrong type (for instance, a movement between the user's own accounts such as "Transfer to savings" or "Transfer from everyday account" currently tagged as "expense" or "income" should be type="transfer" and categoryId="cat_transfer").
 3. A raw bank description is messy/cryptic (e.g. "POS WOOLWORTHS 1042 SYDNEY AU 00412") and can be clarified slightly while preserving the merchant identity.
 
 Do NOT include transactions whose categoryId, type, and description are already accurate.
@@ -399,6 +471,10 @@ ${JSON.stringify(batch)}`;
         lang: 'es' | 'en';
       };
 
+      if (!Array.isArray(profiles) || profiles.length === 0) {
+        res.status(400).json({ error: 'No se recibieron perfiles. Crea al menos un perfil en la app antes de usar la IA.' });
+        return;
+      }
       const ai = getAiClient();
 
       const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
@@ -483,23 +559,27 @@ ${promptText || '(See attached receipt/screenshot image)'}`,
       const ai = getAiClient();
 
       const systemInstruction = `You are the Midas Tracker AI Financial Agent for the household finance app.
-You have full visibility into their current snapshot (profiles, transactions, budgets, fixed bills, bank/GoalSaver accounts, and Moomoo ETFs/stocks) and you actively improve every part of the app:
+You receive a compact snapshot of the selected month (profiles, month summary, totals per category, budgets, account balances, savings accounts with interest, investment holdings, fixed bills and that month's movements, possibly capped) and you help improve every part of the app:
 - Overview & Analytics: diagnose cashflow, savings rate, account-by-account performance, and spending spikes.
 - Transactions: spot misclassified rows, duplicates, or hidden recurring expenses.
 - Budgets: explain exceeded categories and propose realistic budget adjustments.
-- Accounts & GoalSaver: create/delete accounts when requested or when an extra account is needed, and optimize cash allocation and bonus interest conditions.
-- Moomoo Investments: analyze portfolio diversification, AUD/USD exposure, and dividend yield strategy.
+- Accounts & savings: create/delete accounts when requested or when an extra account is needed, and optimize cash allocation and bonus-interest conditions of savings accounts.
+- Investments: analyze portfolio diversification, currency exposure, and dividend yield strategy.
+- Only the selected month's movements are included; if the user asks about other periods, say what data you have.
 
 RESPONSE RULES:
 - Reply strictly in ${lang === 'en' ? 'English' : 'Spanish'}.
 - Be concrete, data-backed (cite exact profile names, numbers, accounts, tickers, categories from the snapshot), concise, and practical.
 - When the user asks to classify, create a budget, add a recurring fixed bill, log a transaction, or CREATE / DELETE an account — or when you see a clear opportunity to fix something in the snapshot — return actionable items in "proposedActions" using ONLY exact valid profile ids, categoryId, accountId, and txId values present in the snapshot! Never invent fake IDs.
 - Valid actionType values: "reclassify_tx" | "upsert_budget" | "add_fixed_expense" | "add_transaction" | "create_account" | "delete_account".
-- For "create_account": include "description" (account name), "owner" (exact profile id), "accountKind" ("commbank"|"goalsaver"|"revolut"|"moomoo"|"wise"|"cash"|"other"), "currency", "amount" (initialBalance, default 0), and optional "notes".
+- For "create_account": include "description" (account name), "owner" (exact profile id), "accountKind" (generic type: "transaccional"|"ahorro"|"inversion"|"tarjeta_credito"|"efectivo"|"otra"), optional "institution" (bank name), "currency", "amount" (initialBalance, default 0), and optional "notes".
 - For "delete_account": include exact "accountId" and "description" (account name).
 - If no state change is needed, return proposedActions as an empty array [].`;
 
-      const conversationText = messages
+      // Only the last 10 turns are used (the client already trims; this is a server-side guard).
+      const conversationText = (Array.isArray(messages) ? messages : [])
+        .slice(-10)
+        .map((m) => ({ role: m.role, text: String(m.text || '').slice(0, 4000) }))
         .map((m) => `${m.role === 'user' ? 'User' : 'Agent'}: ${m.text}`)
         .join('\n\n');
 
@@ -549,6 +629,7 @@ ${conversationText}`;
                       dueDay: { type: Type.NUMBER },
                       accountId: { type: Type.STRING },
                       accountKind: { type: Type.STRING },
+                      institution: { type: Type.STRING },
                       notes: { type: Type.STRING },
                       date: { type: Type.STRING },
                     },
@@ -618,6 +699,19 @@ ${conversationText}`;
     } catch (err) {
       res.status(502).json({ error: err instanceof Error ? err.message : 'FX fetch failed' });
     }
+  });
+
+  // JSON errors for oversized or malformed bodies (instead of Express' HTML error page).
+  app.use((err: { type?: string; status?: number } & Error, _req: Request, res: Response, next: NextFunction) => {
+    if (err?.type === 'entity.too.large') {
+      res.status(413).json({ error: 'El archivo es demasiado grande (máximo ~7 MB por documento).' });
+      return;
+    }
+    if (err?.type === 'entity.parse.failed') {
+      res.status(400).json({ error: 'Solicitud JSON inválida.' });
+      return;
+    }
+    next(err);
   });
 
   let closeVite: (() => Promise<void>) | null = null;
