@@ -6,7 +6,6 @@ import {
   Layers,
   LayoutGrid,
   Plus,
-  Sparkles,
   Trash2,
   TrendingUp,
   Upload,
@@ -58,7 +57,6 @@ interface DashboardViewProps {
   onAddAccount: (acc: Omit<Account, 'id'>) => string;
   onDeleteAccount: (id: string) => void;
   onOpenImport?: () => void;
-  onAskAi?: (prompt?: string) => void;
 }
 
 
@@ -76,7 +74,6 @@ export function DashboardView({
   onAddAccount,
   onDeleteAccount,
   onOpenImport,
-  onAskAi,
 }: DashboardViewProps) {
   const { tr, catName, lang, isDark } = useUiPreferences();
 
@@ -673,23 +670,6 @@ export function DashboardView({
             </button>
           </div>
 
-          {onAskAi && (
-            <button
-              type="button"
-              onClick={() =>
-                onAskAi(
-                  tr(
-                    `Analiza el resumen de ${monthHeading}: ingresos, gastos, % de ahorro y dime qué mejorar.`,
-                    `Analyze the ${monthHeading} overview: income, expenses, savings rate, and key improvements.`
-                  )
-                )
-              }
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#DAEAFF]/80 dark:bg-[#022E5B] border border-[#A1C6F6] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-xs font-medium rounded-lg hover:bg-[#DAEAFF] dark:hover:bg-[#033A73] transition-colors whitespace-nowrap"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-[#499BED]" />
-              {tr('Diagnóstico IA del mes', 'AI Month Diagnosis')}
-            </button>
-          )}
           <div className="flex items-center gap-2">
             <label htmlFor="dash-month" className="text-xs font-medium text-[#355170] dark:text-[#A1C6F6]">
               {tr('Mes:', 'Month:')}

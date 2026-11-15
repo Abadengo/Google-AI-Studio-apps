@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Calculator, Landmark, Plus, RefreshCw, Sparkles, Trash2, Upload } from 'lucide-react';
+import { Calculator, Landmark, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -53,7 +53,6 @@ interface AccountsViewProps {
     scope?: ProfileFilter;
   }) => void;
   onOpenImport?: (preset?: CsvPreset) => void;
-  onAskAi?: (prompt?: string) => void;
 }
 
 export function AccountsView({
@@ -67,7 +66,6 @@ export function AccountsView({
   onDeleteSavingsConfig,
   onResetToZero,
   onOpenImport,
-  onAskAi,
 }: AccountsViewProps) {
   const { tr, lang, isDark } = useUiPreferences();
 
@@ -373,23 +371,6 @@ export function AccountsView({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {onAskAi && (
-            <button
-              type="button"
-              onClick={() =>
-                onAskAi(
-                  tr(
-                    'Evalúa nuestras cuentas y fondos de ahorro y sugiere la mejor estrategia para maximizar el interés mensual.',
-                    'Evaluate our accounts and savings funds and suggest the best strategy to maximize monthly interest.'
-                  )
-                )
-              }
-              className="inline-flex items-center gap-2 px-3.5 py-2 bg-[#DAEAFF]/80 dark:bg-[#022E5B] border border-[#A1C6F6] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-sm font-medium rounded-lg hover:bg-[#DAEAFF] dark:hover:bg-[#033A73] whitespace-nowrap transition-colors"
-            >
-              <Sparkles className="w-4 h-4 text-[#499BED]" />
-              {tr('Estrategia de ahorro con IA', 'AI savings strategy')}
-            </button>
-          )}
           {onOpenImport && (
             <button
               type="button"

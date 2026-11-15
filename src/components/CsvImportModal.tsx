@@ -14,7 +14,6 @@ import {
   Sparkles,
   Trash2,
   Upload,
-  Wand2,
   X,
 } from 'lucide-react';
 import { useUiPreferences } from '../contexts/UiPreferencesContext';
@@ -59,12 +58,6 @@ import {
   type DuplicateSource,
   type SuggestedNewAccount,
 } from '../utils/statementDetector';
-import {
-  analyzeDocumentWithAi,
-  classifyTransactionsWithAi,
-  fileToBase64,
-  type AiDocumentAnalysisResponse,
-} from '../utils/aiClient';
 
 interface CsvImportModalProps {
   isOpen: boolean;
@@ -107,7 +100,6 @@ interface PreviewRow {
   type: TransactionType;
   currency: CurrencyCode;
   categoryId: string;
-  aiNote?: string;
   ticker?: string;
   moomooAction?: 'BUY' | 'SELL' | 'DIVIDEND';
   shares?: number;
@@ -119,9 +111,8 @@ interface ImportedFileEntry {
   id: string;
   fileName: string;
   fileSize: number;
-  fileFormat: 'csv' | 'pdf' | 'image';
+  fileFormat: 'csv' | 'pdf';
   mimeType: string;
-  base64Data?: string;
   rawText: string;
   detectedPreset: Exclude<CsvPreset, 'auto'>;
   preset: Exclude<CsvPreset, 'auto'>;
@@ -146,20 +137,6 @@ interface ImportedFileEntry {
   colSide: number;
   colQty: number;
   colPrice: number;
-  aiStatus: 'idle' | 'analyzing' | 'done' | 'error';
-  aiUsedForExtraction: boolean;
-  aiSummary: string;
-  aiError: string;
-  aiRowDefaults: Record<
-    number,
-    {
-      categoryId?: string;
-      type?: TransactionType;
-      description?: string;
-      note?: string;
-      assetType?: 'ETF' | 'Acción' | 'Fondo';
-    }
-  >;
   rowOverrides: Record<number, { selected?: boolean; categoryId?: string; type?: TransactionType }>;
   pdfMeta: { pageCount: number; rawPreviewLines: string[] } | null;
   detectedClosingBalance: { amount: number; currency: CurrencyCode } | null;
@@ -346,9 +323,7 @@ export function CsvImportModal({
         else if (moomooAction === 'BUY') txType = 'expense';
         else if (moomooAction === 'SELL') txType = 'income';
 
-        const aiDef = entry.aiRowDefaults[idx];
         const description =
-          aiDef?.description ||
           (isMoomooMode && ticker
             ? `${
                 moomooAction === 'DIVIDEND'
@@ -369,9 +344,8 @@ export function CsvImportModal({
         const isDuplicate = duplicateSource !== null;
 
         const override = entry.rowOverrides[idx];
-        const finalType = override?.type || aiDef?.type || txType;
+        const finalType = override?.type || txType;
         const defaultCat =
-          aiDef?.categoryId ||
           (moomooAction === 'DIVIDEND'
             ? 'cat_dividendos'
             : guessCategoryId(description, finalType));
@@ -388,15 +362,12 @@ export function CsvImportModal({
           type: finalType,
           currency: curr,
           categoryId: override?.categoryId || defaultCat,
-          aiNote: aiDef?.note,
           ticker,
           moomooAction,
           shares,
           price,
           assetType:
-            aiDef?.assetType === 'Fondo' || aiDef?.assetType === 'ETF' || aiDef?.assetType === 'Acción'
-              ? aiDef.assetType
-              : ((description.toUpperCase().includes('ETF') ? 'ETF' : 'Acción') as
+            ((description.toUpperCase().includes('ETF') ? 'ETF' : 'Acción') as
                   | 'ETF'
                   | 'Acción'),
         });
@@ -552,11 +523,6 @@ export function CsvImportModal({
       headers: parsed.headers,
       rawRows: parsed.rows,
       ...cols,
-      aiStatus: 'idle',
-      aiUsedForExtraction: false,
-      aiSummary: '',
-      aiError: '',
-      aiRowDefaults: {},
       rowOverrides: {},
       pdfMeta: null,
       detectedClosingBalance: parsed.detectedClosingBalance || null,
@@ -583,256 +549,8 @@ export function CsvImportModal({
     };
   };
 
-  const applyAiDocumentResult = (
-    prev: ImportedFileEntry,
-    aiRes: AiDocumentAnalysisResponse
-  ): ImportedFileEntry => {
-    const matchedAccount =
-      accounts.find((a) => a.id === aiRes.targetAccountId) ||
-      pickAccountForOwnerAndPreset(accounts, aiRes.owner, aiRes.preset, aiRes.detectedCurrency) ||
-      accounts[0];
-
-    const headers = ['Date', 'Amount', 'Description', 'Currency', 'Symbol', 'Side', 'Qty', 'Price'];
-    const rawRows: string[][] = aiRes.transactions.map((tx) => {
-      const isOutflow =
-        tx.direction === 'out' ||
-        (tx.direction !== 'in' &&
-          (tx.type === 'expense' ||
-            (tx.type === 'transfer' && !looksLikeIncomingTransfer(tx.description))));
-      const signedAmt = isOutflow ? -Math.abs(tx.amount) : Math.abs(tx.amount);
-      return [
-        tx.date,
-        String(signedAmt),
-        tx.description,
-        tx.currency,
-        tx.ticker || '',
-        tx.moomooAction || '',
-        tx.shares ? String(tx.shares) : '',
-        tx.price ? String(tx.price) : '',
-      ];
-    });
-
-    const aiRowDefaults: ImportedFileEntry['aiRowDefaults'] = {};
-    aiRes.transactions.forEach((tx, idx) => {
-      aiRowDefaults[idx] = {
-        categoryId: tx.categoryId,
-        type: tx.type,
-        description: tx.description,
-        note: tx.classificationNote || '',
-        assetType: tx.assetType === '' ? undefined : tx.assetType,
-      };
-    });
-
-    const finalOwner = prev.manuallyCorrected
-      ? prev.owner
-      : profiles.some((p) => p.id === aiRes.owner)
-      ? aiRes.owner
-      : prev.owner;
-    const finalPreset = prev.manuallyCorrected ? prev.preset : aiRes.preset;
-    const finalAccountId = prev.manuallyCorrected
-      ? prev.targetAccountId
-      : matchedAccount?.id || prev.targetAccountId;
-
-    const aiWantsNewAccount =
-      !prev.manuallyCorrected &&
-      (aiRes.matchedExistingAccount === false || Boolean(aiRes.suggestedNewAccount?.shouldCreate));
-
-    const nextSuggested: SuggestedNewAccount | null = aiWantsNewAccount
-      ? {
-          name:
-            aiRes.suggestedNewAccount?.name ||
-            `${tr('Cuenta nueva', 'New account')} (${aiRes.detectedCurrency})`,
-          owner:
-            aiRes.suggestedNewAccount?.owner &&
-            profiles.some((p) => p.id === aiRes.suggestedNewAccount?.owner)
-              ? aiRes.suggestedNewAccount.owner
-              : finalOwner,
-          kind: aiRes.suggestedNewAccount?.kind || presetToKind(finalPreset),
-          institution: aiRes.suggestedNewAccount?.institution,
-          currency: aiRes.suggestedNewAccount?.currency || aiRes.detectedCurrency || 'AUD',
-          notes:
-            aiRes.suggestedNewAccount?.notes ||
-            tr('Cuenta detectada por IA desde el statement', 'Account detected by AI from statement'),
-        }
-      : prev.suggestedNewAccount;
-
-    return {
-      ...prev,
-      detectedPreset: aiRes.preset,
-      preset: finalPreset,
-      owner: finalOwner,
-      detectedOwner: aiRes.owner,
-      detectionConfidence: aiRes.confidence,
-      detectionReasonEs: aiRes.ownerReason || prev.detectionReasonEs,
-      detectionReasonEn: aiRes.ownerReason || prev.detectionReasonEn,
-      targetAccountId: finalAccountId,
-      defaultCurrency: aiRes.detectedCurrency || matchedAccount?.currency || prev.defaultCurrency,
-      headers,
-      rawRows,
-      colDate: 0,
-      colAmount: 1,
-      colDebit: -1,
-      colCredit: -1,
-      colDesc: 2,
-      colCurrency: 3,
-      colTicker: 4,
-      colSide: 5,
-      colQty: 6,
-      colPrice: 7,
-      aiStatus: 'done',
-      aiUsedForExtraction: true,
-      aiSummary: aiRes.summary,
-      aiError: '',
-      aiRowDefaults,
-      rowOverrides: {},
-      detectedClosingBalance:
-        aiRes.closingBalance > 0
-          ? { amount: aiRes.closingBalance, currency: aiRes.detectedCurrency }
-          : prev.detectedClosingBalance,
-      parseError:
-        rawRows.length === 0
-          ? tr(
-              'La IA leyó el documento pero no encontró movimientos de dinero en él.',
-              'AI read the document but found no monetary transactions in it.'
-            )
-          : '',
-      showColumnMapping: false,
-      matchedExistingAccount: prev.manuallyCorrected
-        ? prev.matchedExistingAccount
-        : !aiWantsNewAccount && Boolean(matchedAccount),
-      suggestedNewAccount: nextSuggested,
-      showCreateAccountForm: prev.manuallyCorrected
-        ? prev.showCreateAccountForm
-        : aiWantsNewAccount || !matchedAccount,
-      newAccDraft: prev.manuallyCorrected
-        ? prev.newAccDraft
-        : buildNewAccountDraft(
-            nextSuggested,
-            finalOwner,
-            finalPreset,
-            aiRes.detectedCurrency || prev.defaultCurrency
-          ),
-    };
-  };
-
-  const runAiAnalysisForEntry = async (
-    entrySnapshot: ImportedFileEntry,
-    mode: 'auto' | 'full_read' | 'classify_rows' = 'auto'
-  ) => {
-    updateFileEntry(entrySnapshot.id, (prev) => ({
-      ...prev,
-      aiStatus: 'analyzing',
-      aiError: '',
-    }));
-
-    try {
-      const shouldClassifyOnly =
-        mode === 'classify_rows' ||
-        (mode === 'auto' &&
-          entrySnapshot.fileFormat !== 'image' &&
-          entrySnapshot.rawRows.length > 0);
-
-      if (shouldClassifyOnly) {
-        const cf = computedFiles.find((x) => x.entry.id === entrySnapshot.id);
-        const rowsToClassify =
-          cf?.previewRows ||
-          entrySnapshot.rawRows.map((row, idx) => {
-            const signedAmt = getSignedRowAmount(entrySnapshot, row);
-            return {
-              rowIndex: idx,
-              date: normalizeDateToISO(row[entrySnapshot.colDate] || ''),
-              description: row[entrySnapshot.colDesc] || '',
-              amount: Math.abs(signedAmt),
-              type: (signedAmt >= 0 ? 'income' : 'expense') as TransactionType,
-              currency: entrySnapshot.defaultCurrency,
-              categoryId: guessCategoryId(
-                row[entrySnapshot.colDesc] || '',
-                signedAmt >= 0 ? 'income' : 'expense'
-              ),
-            };
-          });
-
-        const txPayload: Transaction[] = rowsToClassify.map((r) => ({
-          id: String(r.rowIndex),
-          owner: entrySnapshot.owner,
-          type: r.type,
-          date: r.date,
-          amount: r.amount,
-          currency: r.currency,
-          categoryId: r.categoryId,
-          accountId: entrySnapshot.targetAccountId,
-          description: r.description,
-        }));
-
-        const res = await classifyTransactionsWithAi({
-          transactions: txPayload,
-          categories,
-          accounts,
-          lang,
-        });
-
-        updateFileEntry(entrySnapshot.id, (prev) => {
-          const nextDefaults = { ...prev.aiRowDefaults };
-          for (const s of res.suggestions) {
-            const rIdx = Number(s.id);
-            if (!Number.isNaN(rIdx)) {
-              nextDefaults[rIdx] = {
-                ...nextDefaults[rIdx],
-                categoryId: s.suggestedCategoryId,
-                type: s.suggestedType,
-                description: s.suggestedDescription || nextDefaults[rIdx]?.description,
-                note: s.reason,
-              };
-            }
-          }
-          return {
-            ...prev,
-            aiStatus: 'done',
-            aiSummary: res.summary,
-            aiError: '',
-            aiRowDefaults: nextDefaults,
-          };
-        });
-      } else {
-        const aiRes = await analyzeDocumentWithAi({
-          fileName: entrySnapshot.fileName,
-          mimeType: entrySnapshot.mimeType,
-          base64Data: entrySnapshot.base64Data,
-          textContent: entrySnapshot.rawText || undefined,
-          accounts,
-          categories,
-          profiles,
-          activeProfile,
-          lang,
-        });
-
-        updateFileEntry(entrySnapshot.id, (prev) => applyAiDocumentResult(prev, aiRes));
-      }
-    } catch (err) {
-      const errMsg =
-        err instanceof Error
-          ? err.message
-          : tr(
-              'No se pudo analizar el documento con IA.',
-              'Could not analyze the document with AI.'
-            );
-      updateFileEntry(entrySnapshot.id, (prev) => ({
-        ...prev,
-        aiStatus: 'error',
-        aiError: errMsg,
-      }));
-    }
-  };
-
-  const handleAnalyzeBatchWithAi = async () => {
-    const targets = files.filter((f) => f.aiStatus !== 'analyzing');
-    if (targets.length === 0) return;
-    await Promise.all(targets.map((entry) => runAiAnalysisForEntry(entry, 'auto')));
-  };
-
   const buildPdfEntry = async (
     buffer: ArrayBuffer,
-    base64Data: string,
     name: string,
     fileSize: number,
     forcedPreset?: CsvPreset
@@ -872,7 +590,6 @@ export function CsvImportModal({
         fileSize,
         fileFormat: 'pdf',
         mimeType: 'application/pdf',
-        base64Data,
         rawText: parsed.fullText,
         detectedPreset: detection.preset,
         preset: effectivePreset,
@@ -887,11 +604,6 @@ export function CsvImportModal({
         headers: parsed.headers,
         rawRows: parsed.rows,
         ...cols,
-        aiStatus: 'idle',
-        aiUsedForExtraction: false,
-        aiSummary: '',
-        aiError: '',
-        aiRowDefaults: {},
         rowOverrides: {},
         pdfMeta: {
           pageCount: parsed.pageCount,
@@ -903,8 +615,8 @@ export function CsvImportModal({
         parseError:
           parsed.rows.length === 0
             ? tr(
-                'No se detectaron tablas estándar localmente; activando lectura inteligente con IA...',
-                'No standard tabular rows detected locally; starting AI document reader...'
+                'No se encontraron movimientos en este PDF. Si es un escaneo o una imagen, descarga el extracto en CSV desde tu banco, o ajusta las columnas manualmente.',
+                'No transactions were found in this PDF. If it is a scan or an image, download the CSV statement from your bank, or map the columns manually.'
               )
             : '',
         showRawPdfText: false,
@@ -929,15 +641,14 @@ export function CsvImportModal({
         fileSize,
         fileFormat: 'pdf',
         mimeType: 'application/pdf',
-        base64Data,
         rawText: '',
         detectedPreset: 'generic',
         preset: 'generic',
         owner: fallbackOwner,
         detectedOwner: fallbackOwner,
         detectionConfidence: 'fallback',
-        detectionReasonEs: 'Lectura local fallida — listo para lectura multimodal con IA',
-        detectionReasonEn: 'Local parse failed — ready for AI multimodal reading',
+        detectionReasonEs: 'No se pudo leer el PDF en el navegador',
+        detectionReasonEn: 'The PDF could not be read in the browser',
         manuallyCorrected: false,
         targetAccountId: fallbackAcc?.id || '',
         defaultCurrency: fallbackAcc?.currency || 'AUD',
@@ -953,19 +664,14 @@ export function CsvImportModal({
         colSide: -1,
         colQty: -1,
         colPrice: -1,
-        aiStatus: 'idle',
-        aiUsedForExtraction: false,
-        aiSummary: '',
-        aiError: '',
-        aiRowDefaults: {},
         rowOverrides: {},
         pdfMeta: null,
         detectedClosingBalance: null,
         syncGoalSaverBalance: false,
         importMoomooToPortfolio: true,
         parseError: tr(
-          'PDF escaneado o formato complejo. Se leerá con el agente de IA.',
-          'Scanned or complex PDF. It will be read with the AI agent.'
+          'PDF escaneado o protegido: no se puede leer como texto. Descarga el extracto en CSV (o PDF digital) desde tu banco.',
+          'Scanned or protected PDF: it cannot be read as text. Download the CSV (or digital PDF) statement from your bank.'
         ),
         showRawPdfText: false,
         showColumnMapping: false,
@@ -975,60 +681,6 @@ export function CsvImportModal({
         newAccDraft: buildNewAccountDraft(null, fallbackOwner, 'generic', fallbackAcc?.currency || 'AUD'),
       };
     }
-  };
-
-  const buildImageEntry = async (file: File): Promise<ImportedFileEntry> => {
-    const base64Data = await fileToBase64(file);
-    const fallbackOwner: ProfileId = defaultPrimaryOwner;
-    const fallbackAcc = pickAccountForOwnerAndPreset(accounts, fallbackOwner, 'generic');
-    return {
-      id: `imp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      fileName: file.name,
-      fileSize: file.size,
-      fileFormat: 'image',
-      mimeType: file.type || 'image/jpeg',
-      base64Data,
-      rawText: '',
-      detectedPreset: 'generic',
-      preset: 'generic',
-      owner: fallbackOwner,
-      detectedOwner: fallbackOwner,
-      detectionConfidence: 'fallback',
-      detectionReasonEs: 'Imagen/captura recibida — leyendo con IA...',
-      detectionReasonEn: 'Image/screenshot uploaded — reading with AI...',
-      manuallyCorrected: false,
-      targetAccountId: fallbackAcc?.id || '',
-      defaultCurrency: fallbackAcc?.currency || 'AUD',
-      headers: [],
-      rawRows: [],
-      colDate: 0,
-      colDesc: 2,
-      colAmount: 1,
-      colDebit: -1,
-      colCredit: -1,
-      colCurrency: -1,
-      colTicker: -1,
-      colSide: -1,
-      colQty: -1,
-      colPrice: -1,
-      aiStatus: 'idle',
-      aiUsedForExtraction: false,
-      aiSummary: '',
-      aiError: '',
-      aiRowDefaults: {},
-      rowOverrides: {},
-      pdfMeta: null,
-      detectedClosingBalance: null,
-      syncGoalSaverBalance: false,
-      importMoomooToPortfolio: true,
-      parseError: '',
-      showRawPdfText: false,
-      showColumnMapping: false,
-      matchedExistingAccount: Boolean(fallbackAcc),
-      suggestedNewAccount: null,
-      showCreateAccountForm: !fallbackAcc,
-      newAccDraft: buildNewAccountDraft(null, fallbackOwner, 'generic', fallbackAcc?.currency || 'AUD'),
-    };
   };
 
   const processMultipleFiles = async (selectedList: File[]) => {
@@ -1048,11 +700,7 @@ export function CsvImportModal({
         lowerName.endsWith('.csv') ||
         file.type === 'text/csv' ||
         file.type === 'application/vnd.ms-excel';
-      const isImage =
-        file.type.startsWith('image/') ||
-        /\.(png|jpe?g|webp)$/i.test(lowerName);
-
-      if (!isPdf && !isCsv && !isImage) {
+      if (!isPdf && !isCsv) {
         skippedUnsupported++;
         continue;
       }
@@ -1079,8 +727,8 @@ export function CsvImportModal({
       if (skippedUnsupported > 0) {
         notes.push(
           tr(
-            `${skippedUnsupported} archivo(s) no soportado(s) (usa .PDF, .CSV o imágenes .PNG/.JPG)`,
-            `${skippedUnsupported} unsupported file(s) (use .PDF, .CSV or .PNG/.JPG images)`
+            `${skippedUnsupported} archivo(s) no soportado(s) (usa .PDF o .CSV)`,
+            `${skippedUnsupported} unsupported file(s) (use .PDF or .CSV)`
           )
         );
       }
@@ -1096,18 +744,8 @@ export function CsvImportModal({
         validFiles.map(async (file) => {
           const lowerName = file.name.toLowerCase();
           const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf');
-          const isImage =
-            file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(lowerName);
-
-          if (isImage) {
-            return buildImageEntry(file);
-          }
           if (isPdf) {
-            const [buffer, base64Data] = await Promise.all([
-              file.arrayBuffer(),
-              fileToBase64(file),
-            ]);
-            return buildPdfEntry(buffer, base64Data, file.name, file.size);
+            return buildPdfEntry(await file.arrayBuffer(), file.name, file.size);
           }
           const text = await file.text();
           return buildCsvEntry(text, file.name, file.size);
@@ -1122,13 +760,6 @@ export function CsvImportModal({
       setParsingCount((c) => Math.max(0, c - validFiles.length));
     }
 
-    // Automatically run AI reading for images or PDFs with 0 locally-parsed rows (e.g. scanned PDFs)
-    const needsAiRead = createdEntries.filter(
-      (e) => e.fileFormat === 'image' || (e.fileFormat === 'pdf' && e.rawRows.length === 0)
-    );
-    if (needsAiRead.length > 0) {
-      void Promise.all(needsAiRead.map((entry) => runAiAnalysisForEntry(entry, 'full_read')));
-    }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1178,12 +809,6 @@ export function CsvImportModal({
     appendEntryIfNotLoaded(entry);
   };
 
-  const uint8ToBase64 = (bytes: Uint8Array): string => {
-    let bin = '';
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin);
-  };
-
   const handleLoadSamplePdfDirectly = async (
     kind: 'commbank' | 'goalsaver' | 'revolut' | 'moomoo',
     ownerHint?: ProfileId
@@ -1196,7 +821,6 @@ export function CsvImportModal({
     try {
       const entry = await buildPdfEntry(
         buffer as ArrayBuffer,
-        uint8ToBase64(bytes),
         `${holderName.toLowerCase().replace(/\s+/g, '_')}_${kind}_statement.pdf`,
         bytes.byteLength,
         kind
@@ -1224,7 +848,6 @@ export function CsvImportModal({
             p1CommBytes.byteOffset,
             p1CommBytes.byteOffset + p1CommBytes.byteLength
           ) as ArrayBuffer,
-          uint8ToBase64(p1CommBytes),
           `${primaryName.toLowerCase().replace(/\s+/g, '_')}_commbank_statement.pdf`,
           p1CommBytes.byteLength
         ),
@@ -1233,7 +856,6 @@ export function CsvImportModal({
             p2GoalBytes.byteOffset,
             p2GoalBytes.byteOffset + p2GoalBytes.byteLength
           ) as ArrayBuffer,
-          uint8ToBase64(p2GoalBytes),
           `${secondaryName.toLowerCase().replace(/\s+/g, '_')}_goalsaver_statement.pdf`,
           p2GoalBytes.byteLength
         ),
@@ -1282,9 +904,7 @@ export function CsvImportModal({
       const { entry, targetAccount, isMoomooMode, isGoalSaverContext, selectedRows } = cf;
 
       if (selectedRows.length > 0) {
-        const sourceTag: Transaction['source'] = entry.aiUsedForExtraction
-          ? 'ai_document'
-          : entry.fileFormat === 'pdf'
+        const sourceTag: Transaction['source'] = entry.fileFormat === 'pdf'
           ? entry.preset === 'commbank'
             ? 'pdf_commbank'
             : entry.preset === 'goalsaver'
@@ -1436,14 +1056,14 @@ export function CsvImportModal({
           <div>
             <h2 id="csv-modal-title" className="text-lg font-semibold text-[#031725] dark:text-[#DAEAFF]">
               {tr(
-                'Importar Statements y Documentos con IA (PDF / CSV / Foto)',
-                'Import Statements & Documents with AI (PDF / CSV / Image)'
+                'Importar extractos (PDF / CSV)',
+                'Import statements (PDF / CSV)'
               )}
             </h2>
             <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6] mt-0.5">
               {tr(
-                'Carga PDFs (digitales o escaneados), CSV o fotos de recibos/capturas. La IA detecta titular, cuenta, movimientos y categoría automáticamente.',
-                'Upload PDFs (digital or scanned), CSVs, or receipt/statement photos. AI detects holder, account, rows, and categories automatically.'
+                'Carga extractos en PDF digital o CSV. La app detecta el formato, el titular, la cuenta, los duplicados y sugiere categorías; todo se procesa en tu navegador.',
+                'Upload digital PDF or CSV statements. The app detects the format, holder, account and duplicates and suggests categories; everything is processed in your browser.'
               )}
             </p>
           </div>
@@ -1493,18 +1113,18 @@ export function CsvImportModal({
                 <p className="text-sm font-medium text-[#031725] dark:text-[#DAEAFF]">
                   {files.length > 0
                     ? tr(
-                        `${files.length} archivo(s) en el lote · Arrastra o selecciona más PDF, CSV o imágenes`,
-                        `${files.length} file(s) in batch · Drag & drop or pick more PDF, CSV, or images`
+                        `${files.length} archivo(s) en el lote · Arrastra o selecciona más PDF o CSV`,
+                        `${files.length} file(s) in batch · Drag & drop or pick more PDF or CSV`
                       )
                     : tr(
-                        'Arrastra o selecciona varios extractos (.PDF, .CSV o fotos .PNG/.JPG)',
-                        'Drag & drop or select multiple statements (.PDF, .CSV, or .PNG/.JPG photos)'
+                        'Arrastra o selecciona varios extractos (.PDF o .CSV)',
+                        'Drag & drop or select multiple statements (.PDF or .CSV)'
                       )}
                 </p>
                 <p className="text-xs text-[#5A7694] dark:text-[#A1C6F6] mt-1 mb-3.5">
                   {tr(
-                    `Detecta titular (${profiles.map((p) => p.name).join('/')}), cuenta destino (o sugiere crear una nueva), evita duplicados y clasifica gastos con IA.`,
-                    `Detects holder (${profiles.map((p) => p.name).join('/')}), target account (or suggests creating a new one), avoids duplicates, and classifies transactions with AI.`
+                    `Detecta titular (${profiles.map((p) => p.name).join('/')}), cuenta destino (o sugiere crear una nueva), evita duplicados y sugiere categorías.`,
+                    `Detects holder (${profiles.map((p) => p.name).join('/')}), target account (or suggests creating a new one), avoids duplicates, and suggests categories.`
                   )}
                 </p>
 
@@ -1517,7 +1137,7 @@ export function CsvImportModal({
                     <input
                       type="file"
                       multiple
-                      accept=".csv,.pdf,.png,.jpg,.jpeg,.webp,text/csv,application/pdf,image/*"
+                      accept=".csv,.pdf,text/csv,application/pdf"
                       onChange={handleFileUpload}
                       className="hidden"
                     />
@@ -1619,24 +1239,11 @@ export function CsvImportModal({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-semibold text-[#031725] dark:text-[#DAEAFF]">
                   {tr(
-                    `Documentos cargados (${computedFiles.length}) — Detección y clasificación IA`,
-                    `Loaded statements (${computedFiles.length}) — Auto-detection & AI classification`
+                    `Documentos cargados (${computedFiles.length}) — Detección automática`,
+                    `Loaded statements (${computedFiles.length}) — Auto-detection`
                   )}
                 </h3>
                 <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    disabled={files.some((f) => f.aiStatus === 'analyzing')}
-                    onClick={handleAnalyzeBatchWithAi}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white dark:text-[#031725] bg-[#022E5B] dark:bg-[#499BED] rounded-lg hover:bg-[#031725] dark:hover:bg-[#6EB1F5] disabled:opacity-50 transition-colors"
-                  >
-                    {files.some((f) => f.aiStatus === 'analyzing') ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Wand2 className="w-3.5 h-3.5" />
-                    )}
-                    {tr('Analizar y clasificar lote con IA', 'Analyze & classify batch with AI')}
-                  </button>
                   <div className="text-xs text-[#5A7694] dark:text-[#A1C6F6] font-mono-num">
                     <strong className="text-[#022E5B] dark:text-[#499BED]">
                       {batchStats.selectedRows}
@@ -1673,8 +1280,6 @@ export function CsvImportModal({
                         >
                           {entry.fileFormat === 'pdf' ? (
                             <FileText className="w-4 h-4 text-[#022E5B] dark:text-[#499BED] shrink-0" />
-                          ) : entry.fileFormat === 'image' ? (
-                            <FileImage className="w-4 h-4 text-[#499BED] shrink-0" />
                           ) : (
                             <FileSpreadsheet className="w-4 h-4 text-[#496685] dark:text-[#A1C6F6] shrink-0" />
                           )}
@@ -1687,12 +1292,7 @@ export function CsvImportModal({
                         </button>
 
                         <div className="flex flex-wrap items-center gap-2 text-xs shrink-0">
-                          {entry.aiStatus === 'analyzing' ? (
-                            <span className="inline-flex items-center gap-1.5 text-[#022E5B] dark:text-[#499BED] font-medium">
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              {tr('IA analizando...', 'AI analyzing...')}
-                            </span>
-                          ) : entry.parseError ? (
+                          {entry.parseError ? (
                             <span className="text-amber-700 dark:text-amber-400 font-medium">
                               {tr('Requiere revisión', 'Needs review')}
                             </span>
@@ -1710,45 +1310,6 @@ export function CsvImportModal({
                             </span>
                           )}
 
-                          <button
-                            type="button"
-                            disabled={entry.aiStatus === 'analyzing'}
-                            onClick={() =>
-                              runAiAnalysisForEntry(
-                                entry,
-                                entry.rawRows.length === 0 || entry.fileFormat === 'image'
-                                  ? 'full_read'
-                                  : 'classify_rows'
-                              )
-                            }
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-[#DAEAFF] dark:bg-[#022E5B] text-[#022E5B] dark:text-[#DAEAFF] hover:bg-[#C6DAF7] dark:hover:bg-[#033A73] disabled:opacity-50 transition-colors"
-                            title={tr(
-                              'Leer documento o clasificar categorías con el agente de IA',
-                              'Read document or classify categories with AI agent'
-                            )}
-                          >
-                            <Wand2 className="w-3 h-3 text-[#499BED]" />
-                            {entry.rawRows.length === 0 || entry.fileFormat === 'image'
-                              ? tr('Leer con IA', 'Read with AI')
-                              : entry.aiStatus === 'done'
-                              ? tr('Re-clasificar IA', 'Re-classify AI')
-                              : tr('Clasificar con IA', 'Classify with AI')}
-                          </button>
-
-                          {entry.fileFormat !== 'image' && entry.rawRows.length > 0 && (
-                            <button
-                              type="button"
-                              disabled={entry.aiStatus === 'analyzing'}
-                              onClick={() => runAiAnalysisForEntry(entry, 'full_read')}
-                              className="px-2 py-1 rounded-md text-[11px] font-medium text-[#355170] dark:text-[#A1C6F6] border border-[#C6DAF7] dark:border-[#1B4A7C] hover:bg-[#EAF2FF] dark:hover:bg-[#022E5B] disabled:opacity-50 transition-colors"
-                              title={tr(
-                                'Re-extraer todas las líneas directamente con Gemini',
-                                'Re-extract all rows directly with Gemini'
-                              )}
-                            >
-                              {tr('Re-leer IA', 'AI re-read')}
-                            </button>
-                          )}
 
                           <button
                             type="button"
@@ -1775,18 +1336,6 @@ export function CsvImportModal({
                         </div>
                       </div>
 
-                      {entry.aiError && (
-                        <div className="mt-2 p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/35 border border-rose-200 dark:border-rose-800/70 text-rose-800 dark:text-rose-200 text-[11px]">
-                          {entry.aiError}
-                        </div>
-                      )}
-
-                      {entry.aiStatus === 'done' && entry.aiSummary && (
-                        <div className="mt-2 p-2.5 rounded-lg bg-[#EAF2FF] dark:bg-[#022E5B]/60 border border-[#C6DAF7] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-[11px] flex items-start gap-1.5">
-                          <Sparkles className="w-3.5 h-3.5 text-[#499BED] shrink-0 mt-0.5" />
-                          <span>{entry.aiSummary}</span>
-                        </div>
-                      )}
 
                       {/* Detection hint line */}
                       <div className="mt-2 flex items-center gap-1.5 text-[11px]">
@@ -2544,11 +2093,6 @@ export function CsvImportModal({
                                   </span>
                                 )}
                               </div>
-                              {row.aiNote && (
-                                <p className="text-[11px] text-[#499BED] truncate mt-0.5">
-                                  IA: {row.aiNote}
-                                </p>
-                              )}
                             </td>
                             <td className="py-2 px-3">
                               <select
@@ -2667,8 +2211,7 @@ export function CsvImportModal({
               type="button"
               disabled={
                 (batchStats.selectedRows === 0 && batchStats.goalSaverSyncs === 0) ||
-                isParsing ||
-                files.some((f) => f.aiStatus === 'analyzing')
+                isParsing
               }
               onClick={handleConfirmImport}
               className="px-5 py-2 text-sm font-semibold text-white dark:text-[#031725] bg-[#022E5B] dark:bg-[#499BED] hover:bg-[#031725] dark:hover:bg-[#6EB1F5] disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"

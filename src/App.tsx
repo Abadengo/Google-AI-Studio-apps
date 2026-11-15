@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Globe, HardDriveDownload, LogOut, Moon, Plus, RotateCcw, Sparkles, Sun, Upload, Users, X } from 'lucide-react';
+import { Globe, HardDriveDownload, LogOut, Moon, Plus, RotateCcw, Sun, Upload, Users, X } from 'lucide-react';
 import { AccountsView } from './components/AccountsView';
-import { AiAgentDrawer } from './components/AiAgentDrawer';
-import { AiReclassifyModal } from './components/AiReclassifyModal';
 import { BackupModal } from './components/BackupModal';
 import { BudgetsView } from './components/BudgetsView';
 import { CsvImportModal } from './components/CsvImportModal';
@@ -10,8 +8,6 @@ import { DashboardView } from './components/DashboardView';
 import { InvestmentsView } from './components/InvestmentsView';
 import type { CloudSession } from './components/AuthGate';
 import { signOutUser } from './firebase/client';
-import { setAuthTokenProvider } from './utils/aiClient';
-import { getIdToken } from './firebase/client';
 import { ProfilesModal } from './components/ProfilesModal';
 import { ResetZeroModal } from './components/ResetZeroModal';
 import { TransactionModal } from './components/TransactionModal';
@@ -78,19 +74,11 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
   const [isCsvModalOpen, setIsCsvModalOpen] = useState(false);
   const [importModalPreset, setImportModalPreset] = useState<CsvPreset>('auto');
   const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
-  const [isAiDrawerOpen, setIsAiDrawerOpen] = useState(false);
-  const [aiInitialPrompt, setAiInitialPrompt] = useState<string>('');
-  const [isAiReclassifyOpen, setIsAiReclassifyOpen] = useState(false);
   const [isProfilesModalOpen, setIsProfilesModalOpen] = useState(false);
   const [isResetZeroOpen, setIsResetZeroOpen] = useState(false);
   const [hideSampleNotice, setHideSampleNotice] = useState(false);
   const [hideBackupReminder, setHideBackupReminder] = useState(false);
   const [hideLocalLeftover, setHideLocalLeftover] = useState(false);
-
-  // AI calls are authorised with the signed-in user's Firebase ID token.
-  useEffect(() => {
-    setAuthTokenProvider(cloud ? getIdToken : null);
-  }, [cloud]);
 
   const daysSinceBackup = state.lastBackupAt
     ? Math.floor((Date.now() - new Date(state.lastBackupAt).getTime()) / (24 * 3600 * 1000))
@@ -108,11 +96,6 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
       setActiveProfile('all');
     }
   }, [activeProfile, state.profiles]);
-
-  const handleOpenAi = (prompt?: string) => {
-    setAiInitialPrompt(prompt || '');
-    setIsAiDrawerOpen(true);
-  };
 
   const handleOpenImport = (preset: CsvPreset = 'auto') => {
     setImportModalPreset(preset);
@@ -320,15 +303,6 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
 
             <button
               type="button"
-              onClick={() => handleOpenAi()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white dark:text-[#031725] bg-[#022E5B] dark:bg-[#499BED] rounded-lg hover:bg-[#031725] dark:hover:bg-[#6EB1F5] transition-colors whitespace-nowrap shrink-0"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              {tr('Agente IA', 'AI Agent')}
-            </button>
-
-            <button
-              type="button"
               onClick={() => handleOpenImport('auto')}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#022E5B] dark:text-[#DAEAFF] bg-white dark:bg-[#022E5B]/80 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg hover:bg-[#DAEAFF]/50 dark:hover:bg-[#022E5B] transition-colors whitespace-nowrap shrink-0"
             >
@@ -514,7 +488,6 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
             onAddAccount={addAccount}
             onDeleteAccount={deleteAccount}
             onOpenImport={() => handleOpenImport('auto')}
-            onAskAi={handleOpenAi}
           />
         )}
 
@@ -528,7 +501,6 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
             onEditTransaction={handleEditTransaction}
             onDeleteTransaction={deleteTransaction}
             onOpenCsvImport={() => handleOpenImport('auto')}
-            onOpenAiReclassify={() => setIsAiReclassifyOpen(true)}
             onResetToZero={resetToZero}
           />
         )}
@@ -542,7 +514,6 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
             onUpsertBudget={upsertBudget}
             onDeleteBudget={deleteBudget}
             onOpenImport={() => handleOpenImport('auto')}
-            onAskAi={handleOpenAi}
           />
         )}
 
@@ -558,7 +529,6 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
             onDeleteSavingsConfig={deleteSavingsConfig}
             onResetToZero={resetToZero}
             onOpenImport={(preset) => handleOpenImport(preset || 'auto')}
-            onAskAi={handleOpenAi}
           />
         )}
 
@@ -571,7 +541,6 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
             onDeleteHolding={deleteInvestment}
             onResetToZero={resetToZero}
             onOpenCsvImport={() => handleOpenImport('auto')}
-            onAskAi={handleOpenAi}
           />
         )}
       </main>
@@ -660,37 +629,6 @@ export default function App({ cloud }: { cloud?: CloudSession } = {}) {
         onUpdateProfile={updateProfile}
         onDeleteProfile={deleteProfile}
         onSelectActiveProfile={(id) => setActiveProfile(id)}
-      />
-
-      <AiReclassifyModal
-        isOpen={isAiReclassifyOpen}
-        onClose={() => setIsAiReclassifyOpen(false)}
-        transactions={state.transactions}
-        categories={state.categories}
-        accounts={state.accounts}
-        profiles={state.profiles}
-        activeProfile={activeProfile}
-        selectedMonth={selectedMonth}
-        onApplyBatch={updateTransactionsBatch}
-      />
-
-      <AiAgentDrawer
-        isOpen={isAiDrawerOpen}
-        onClose={() => setIsAiDrawerOpen(false)}
-        state={state}
-        activeTab={activeTab}
-        activeProfile={activeProfile}
-        selectedMonth={selectedMonth}
-        initialPrompt={aiInitialPrompt}
-        onClearInitialPrompt={() => setAiInitialPrompt('')}
-        onOpenImport={() => handleOpenImport('auto')}
-        onOpenReclassify={() => setIsAiReclassifyOpen(true)}
-        onReclassifyBatch={updateTransactionsBatch}
-        onUpsertBudget={upsertBudget}
-        onAddFixedExpense={addFixedExpense}
-        onAddTransaction={addTransaction}
-        onAddAccount={addAccount}
-        onDeleteAccount={deleteAccount}
       />
     </div>
   );

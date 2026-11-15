@@ -69,7 +69,7 @@ export interface Transaction {
     | 'pdf_revolut'
     | 'pdf_moomoo'
     | 'pdf_other'
-    | 'ai_document';
+    | 'ai_document'; // kept so older imported movements stay valid
 }
 
 export interface Budget {
@@ -110,6 +110,8 @@ export interface InvestmentHolding {
   shares: number;
   avgCostPerShare: number;
   currentPricePerShare: number;
+  /** ISO date of the last manual price update (prices are entered by hand). */
+  priceUpdatedAt?: string;
   dividendYieldAnnual: number; // % e.g. 1.5
   currency: CurrencyCode;
   notes?: string;

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Plus, Sparkles, Trash2, Upload } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Plus, Trash2, Upload } from 'lucide-react';
 import { useUiPreferences } from '../contexts/UiPreferencesContext';
 import type { Budget, CurrencyCode, FinanceState, ProfileFilter } from '../types/finance';
 import {
@@ -19,7 +19,6 @@ interface BudgetsViewProps {
   onUpsertBudget: (budget: Omit<Budget, 'id'> & { id?: string }) => void;
   onDeleteBudget: (id: string) => void;
   onOpenImport?: () => void;
-  onAskAi?: (prompt?: string) => void;
 }
 
 export function BudgetsView({
@@ -30,7 +29,6 @@ export function BudgetsView({
   onUpsertBudget,
   onDeleteBudget,
   onOpenImport,
-  onAskAi,
 }: BudgetsViewProps) {
   const { tr, catName, lang } = useUiPreferences();
 
@@ -148,23 +146,6 @@ export function BudgetsView({
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {onAskAi && (
-            <button
-              type="button"
-              onClick={() =>
-                onAskAi(
-                  tr(
-                    'Analiza mis presupuestos actuales y propón ajustes o límites para categorías sin presupuesto.',
-                    'Analyze my current budgets and propose adjustments or limits for unbudgeted categories.'
-                  )
-                )
-              }
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#DAEAFF]/80 dark:bg-[#022E5B] border border-[#A1C6F6] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-xs font-medium rounded-lg hover:bg-[#DAEAFF] dark:hover:bg-[#033A73] whitespace-nowrap transition-colors"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-[#499BED]" />
-              {tr('Optimizar presupuestos con IA', 'Optimize budgets with AI')}
-            </button>
-          )}
           {onOpenImport && (
             <button
               type="button"

@@ -14,55 +14,31 @@ import {
   persistentMultipleTabManager,
   type Firestore,
 } from 'firebase/firestore';
+import { firebaseConfig, HOUSEHOLD_ID } from './config';
 
-/**
- * Firebase web config comes from the server at runtime (GET /api/config, built from the FIREBASE_*
- * environment variables), so the same build works locally and when published from AI Studio / Cloud Run.
- * Without that config the app keeps the "this browser only" mode (localStorage).
+/*
+ * Development / tests only: `VITE_FIREBASE_EMULATOR_HOST=127.0.0.1 npm run dev` connects to the local
+ * Firebase emulators (with a demo project if config.ts is still empty). Never set in production builds.
  */
-interface RuntimeConfig {
-  firebase: {
-    apiKey: string;
-    authDomain: string;
-    projectId: string;
-    appId?: string;
-    storageBucket?: string;
-    messagingSenderId?: string;
-  } | null;
-  householdId: string;
-  emulatorHost: string;
-}
-
-let runtimeConfig: RuntimeConfig = { firebase: null, householdId: 'hogar', emulatorHost: '' };
-
-/** Must be awaited once before rendering (see main.tsx). Never throws: falls back to local mode. */
-export async function loadRuntimeConfig(): Promise<void> {
-  try {
-    const res = await fetch('/api/config', { cache: 'no-store' });
-    if (!res.ok) return;
-    const data = (await res.json()) as Partial<RuntimeConfig>;
-    runtimeConfig = {
-      firebase: data.firebase && data.firebase.apiKey && data.firebase.projectId ? data.firebase : null,
-      householdId: data.householdId || 'hogar',
-      emulatorHost: data.emulatorHost || '',
-    };
-  } catch {
-    /* server unreachable: local mode */
-  }
-}
+const emulatorHost = (import.meta.env.VITE_FIREBASE_EMULATOR_HOST as string | undefined) || '';
+const activeConfig =
+  firebaseConfig.apiKey && firebaseConfig.projectId
+    ? firebaseConfig
+    : emulatorHost
+    ? { apiKey: 'demo-key', authDomain: 'demo-midas.firebaseapp.com', projectId: 'demo-midas', appId: 'demo' }
+    : null;
 
 export function isCloudConfigured(): boolean {
-  return Boolean(runtimeConfig.firebase);
+  return Boolean(activeConfig);
 }
 
 /** Both of you share this household document. */
 export function getHouseholdId(): string {
-  return runtimeConfig.householdId;
+  return HOUSEHOLD_ID;
 }
 
-/** Set only when the server runs against the local Firebase emulators (tests / development). */
 export function getEmulatorHost(): string {
-  return runtimeConfig.emulatorHost;
+  return emulatorHost;
 }
 
 let app: FirebaseApp | null = null;
@@ -70,14 +46,13 @@ let auth: Auth | null = null;
 let db: Firestore | null = null;
 
 function init() {
-  if (!runtimeConfig.firebase || app) return;
-  app = initializeApp(runtimeConfig.firebase);
+  if (!activeConfig || app) return;
+  app = initializeApp(activeConfig);
   auth = getAuth(app);
   // Offline cache shared across tabs: the app keeps working without connection and syncs later.
   db = initializeFirestore(app, {
     localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
   });
-  const emulatorHost = runtimeConfig.emulatorHost;
   if (emulatorHost) {
     connectAuthEmulator(auth, `http://${emulatorHost}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, emulatorHost, 8080);
@@ -105,11 +80,4 @@ export async function signInWithGoogle() {
 export async function signOutUser() {
   if (!isCloudConfigured()) return;
   await signOut(getFirebaseAuth());
-}
-
-/** Fresh ID token of the signed-in user (used to authorise /api/ai/* calls). */
-export async function getIdToken(forceRefresh = false): Promise<string> {
-  if (!isCloudConfigured()) return '';
-  const user = getFirebaseAuth().currentUser;
-  return user ? user.getIdToken(forceRefresh) : '';
 }

@@ -7,41 +7,33 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=server.js --log-level=warning",
-    "start": "node server.js --prod",
+    "dev": "vite",
+    "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
+    "test": "npm run test:rules",
+    "test:rules": "node scripts/build-firestore-rules.mjs && npx -y firebase-tools@15 emulators:exec --only auth,firestore --project demo-midas \"node tests/firestore-rules.test.mjs\"",
     "firebase:rules": "node scripts/build-firestore-rules.mjs",
-    "deploy:rules": "node scripts/build-firestore-rules.mjs --deploy",
-    "test:rules": "node scripts/build-firestore-rules.mjs && npx -y firebase-tools@15 emulators:exec --only auth,firestore --project demo-midas \"node tests/firestore-rules.test.mjs\""
+    "deploy:rules": "node scripts/build-firestore-rules.mjs --deploy"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
-    "@tailwindcss/vite": "^4.3.3",
-    "@vitejs/plugin-react": "^6.1.1",
-    "dotenv": "^17.2.3",
-    "esbuild": "^0.28.0",
-    "express": "^4.21.2",
     "firebase": "^12.19.0",
-    "jose": "^6.2.17",
     "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
     "pdfjs-dist": "^6.5.438",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "recharts": "^3.10.1",
-    "tailwindcss": "^4.3.3",
-    "vite": "^8.3.0"
+    "recharts": "^3.10.1"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "tsx": "^4.21.0",
-    "typescript": "^7.0.2"
+    "@vitejs/plugin-react": "^6.1.1",
+    "dotenv": "^17.2.3",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
   },
   "overrides": {
     "@grpc/grpc-js": "^1.14.0"

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Pencil, Plus, Search, Trash2, Upload, Wand2 } from 'lucide-react';
+import { Pencil, Plus, Search, Trash2, Upload } from 'lucide-react';
 import { useUiPreferences } from '../contexts/UiPreferencesContext';
 import type { FinanceState, ProfileFilter, Transaction, TransactionType } from '../types/finance';
 import {
@@ -19,7 +19,6 @@ interface TransactionsViewProps {
   onEditTransaction: (tx: Transaction) => void;
   onDeleteTransaction: (id: string) => void;
   onOpenCsvImport: () => void;
-  onOpenAiReclassify?: () => void;
   onResetToZero?: (options: {
     accounts: boolean;
     investments: boolean;
@@ -37,7 +36,6 @@ export function TransactionsView({
   onEditTransaction,
   onDeleteTransaction,
   onOpenCsvImport,
-  onOpenAiReclassify,
   onResetToZero,
 }: TransactionsViewProps) {
   const { tr, catName, lang } = useUiPreferences();
@@ -114,16 +112,6 @@ export function TransactionsView({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {onOpenAiReclassify && (
-            <button
-              type="button"
-              onClick={onOpenAiReclassify}
-              className="inline-flex items-center gap-2 px-3.5 py-2 bg-[#DAEAFF]/80 dark:bg-[#022E5B] border border-[#A1C6F6] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-sm font-medium rounded-lg hover:bg-[#DAEAFF] dark:hover:bg-[#033A73] transition-colors whitespace-nowrap"
-            >
-              <Wand2 className="w-4 h-4 text-[#499BED]" />
-              {tr('Reclasificar con IA', 'Reclassify with AI')}
-            </button>
-          )}
           <button
             type="button"
             onClick={onOpenCsvImport}

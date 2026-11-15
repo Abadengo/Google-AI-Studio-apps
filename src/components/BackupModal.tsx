@@ -3,7 +3,7 @@ import { Check, Download, Globe, Moon, RotateCcw, Sun, Trash2, Upload, X } from 
 import { useUiPreferences } from '../contexts/UiPreferencesContext';
 import type { CurrencyCode, ExchangeRates, FinanceState } from '../types/finance';
 import { CURRENCY_META, downloadBlob, getProfileLabel, getTodayISO } from '../utils/formatters';
-import { fetchLiveExchangeRates } from '../utils/marketData';
+import { fetchLiveExchangeRates } from '../utils/fx';
 
 interface BackupModalProps {
   isOpen: boolean;
@@ -381,7 +381,7 @@ export function BackupModal({
                 onClick={async () => {
                   setFxLoading(true);
                   try {
-                    const live = await fetchLiveExchangeRates();
+                    const { rates: live, source } = await fetchLiveExchangeRates();
                     const next: ExchangeRates = { ...state.exchangeRates };
                     for (const code of Object.keys(next) as CurrencyCode[]) {
                       const v = Number(live[code]);
@@ -391,14 +391,17 @@ export function BackupModal({
                     onUpdateExchangeRates(next);
                     setStatusMsg({
                       type: 'ok',
-                      text: tr('Tipos de cambio actualizados con datos del mercado.', 'Exchange rates updated from live market data.'),
+                      text: tr(
+                        `Tipos de cambio actualizados (fuente: ${source}).`,
+                        `Exchange rates updated (source: ${source}).`
+                      ),
                     });
                   } catch (err) {
                     setStatusMsg({
                       type: 'err',
                       text: tr(
-                        `No se pudieron obtener tipos de cambio en vivo (${err instanceof Error ? err.message : ''}).`,
-                        `Could not fetch live exchange rates (${err instanceof Error ? err.message : ''}).`
+                        `No se pudieron obtener tipos de cambio en vivo; se mantienen los actuales y puedes editarlos a mano. (${err instanceof Error ? err.message : ''})`,
+                        `Could not fetch live exchange rates; the current ones are kept and you can edit them by hand. (${err instanceof Error ? err.message : ''})`
                       ),
                     });
                   } finally {

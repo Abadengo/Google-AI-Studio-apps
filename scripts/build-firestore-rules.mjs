@@ -32,14 +32,9 @@ console.log(`firestore.rules generado para: ${emails.join(', ')}`);
 // `npm run deploy:rules` → also publish the rules to your Firebase project.
 if (process.argv.includes('--deploy')) {
   const { spawnSync } = await import('node:child_process');
-  const project = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID;
-  if (!project) {
-    console.error('Falta FIREBASE_PROJECT_ID en .env');
-    process.exit(1);
-  }
-  const r = spawnSync('npx', ['-y', 'firebase-tools@15', 'deploy', '--only', 'firestore:rules', '--project', project], {
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-  });
+  // Project comes from .firebaserc (or FIREBASE_PROJECT_ID in .env if set).
+  const args = ['-y', 'firebase-tools@15', 'deploy', '--only', 'firestore:rules'];
+  if (process.env.FIREBASE_PROJECT_ID) args.push('--project', process.env.FIREBASE_PROJECT_ID);
+  const r = spawnSync('npx', args, { stdio: 'inherit', shell: process.platform === 'win32' });
   process.exit(r.status ?? 1);
 }

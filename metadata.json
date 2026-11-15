@@ -1,8 +1,0 @@
-{
-  "name": "Midas Tracker",
-  "description": "Finanzas del hogar compartidas: ingresos, gastos, presupuestos, ahorro con interés e inversiones, con datos sincronizados en Firebase e inicio de sesión con Google para las cuentas autorizadas.",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
-}

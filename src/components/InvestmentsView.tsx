@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Calculator, Pencil, Plus, RefreshCw, Sparkles, Trash2, TrendingUp, Upload } from 'lucide-react';
+import { Calculator, Pencil, Plus, RefreshCw, Trash2, TrendingUp, Upload } from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -28,7 +28,6 @@ import {
   simulateInvestmentGrowth,
   type DividendPayoutFrequency,
 } from '../utils/formatters';
-import { fetchMarketQuotes, toYahooSymbol } from '../utils/marketData';
 import { ProjectionBarChart } from './Charts';
 import { getSafeProfileChartColor } from './SavingsGrowthLineChart';
 
@@ -45,7 +44,6 @@ interface InvestmentsViewProps {
     scope?: ProfileFilter;
   }) => void;
   onOpenCsvImport: () => void;
-  onAskAi?: (prompt?: string) => void;
 }
 
 export function InvestmentsView({
@@ -56,7 +54,6 @@ export function InvestmentsView({
   onDeleteHolding,
   onResetToZero,
   onOpenCsvImport,
-  onAskAi,
 }: InvestmentsViewProps) {
   const { tr, lang, isDark } = useUiPreferences();
 
@@ -275,85 +272,6 @@ export function InvestmentsView({
 
   const lastDividendCapPoint = dividendCapPoints[dividendCapPoints.length - 1];
 
-  // Real market data: refresh prices, trailing dividend yield and historical growth for the projections.
-  const [marketStatus, setMarketStatus] = useState<{ type: 'ok' | 'err' | 'loading'; text: string } | null>(
-    null
-  );
-
-  const handleRefreshMarketData = async () => {
-    if (holdings.length === 0) return;
-    setMarketStatus({ type: 'loading', text: tr('Consultando el mercado…', 'Fetching market data…') });
-    try {
-      const symbolByHolding = new Map(holdings.map((h) => [h.id, toYahooSymbol(h.ticker, h.currency)]));
-      const { quotes } = await fetchMarketQuotes(Array.from(new Set(symbolByHolding.values())));
-      const bySymbol = new Map(quotes.map((q) => [q.symbol.toUpperCase(), q]));
-
-      let updated = 0;
-      const failed: string[] = [];
-      let cagrWeighted = 0;
-      let cagrWeight = 0;
-
-      for (const h of holdings) {
-        const q = bySymbol.get((symbolByHolding.get(h.id) || '').toUpperCase());
-        if (!q || !q.ok || q.price <= 0) {
-          failed.push(h.ticker);
-          continue;
-        }
-        // Quote currency may differ from the holding currency (e.g. ASX listing tracked in USD).
-        const quoteCurrency = (q.currency in CURRENCY_META ? q.currency : h.currency) as CurrencyCode;
-        const price = convertCurrency(q.price, quoteCurrency, h.currency, state.exchangeRates);
-        onUpdateHolding({
-          ...h,
-          currentPricePerShare: Number(price.toFixed(4)),
-          dividendYieldAnnual: Number(q.dividendYieldPct.toFixed(2)),
-          name: h.name && h.name !== h.ticker ? h.name : q.name,
-        });
-        updated++;
-        if (q.historicalCagrPct !== null) {
-          const weight = convertCurrency(h.shares * price, h.currency, displayCurr, state.exchangeRates);
-          cagrWeighted += q.historicalCagrPct * weight;
-          cagrWeight += weight;
-        }
-      }
-
-      let growthNote = '';
-      if (cagrWeight > 0) {
-        // Conservative: historical growth is not guaranteed, cap the default used for projections.
-        const cagr = Math.min(15, Math.max(0, cagrWeighted / cagrWeight));
-        setCalcGrowthPct(Number(cagr.toFixed(2)));
-        setDivPriceGrowth(Math.round(cagr * 2) / 2);
-        growthNote = tr(
-          ` Crecimiento histórico ponderado del precio: ${cagr.toFixed(2)}% anual (aplicado a las proyecciones).`,
-          ` Weighted historical price growth: ${cagr.toFixed(2)}% p.a. (applied to projections).`
-        );
-      }
-
-      setMarketStatus({
-        type: failed.length > 0 && updated === 0 ? 'err' : 'ok',
-        text:
-          tr(
-            `${updated} posición(es) actualizada(s) con precios reales.`,
-            `${updated} holding(s) updated with live prices.`
-          ) +
-          growthNote +
-          (failed.length > 0
-            ? tr(
-                ` Sin datos para: ${failed.join(', ')} (revisa el ticker; para ASX usa la moneda AUD).`,
-                ` No data for: ${failed.join(', ')} (check the ticker; ASX listings should use AUD).`
-              )
-            : ''),
-      });
-    } catch (err) {
-      setMarketStatus({
-        type: 'err',
-        text: tr(
-          `No se pudo consultar el mercado: ${err instanceof Error ? err.message : ''}. Verifica tu conexión a internet.`,
-          `Could not reach market data: ${err instanceof Error ? err.message : ''}. Check your internet connection.`
-        ),
-      });
-    }
-  };
-
   const openNewForm = () => {
     setEditingHolding(null);
     setFormOwner(defaultOwnerId);
@@ -404,10 +322,16 @@ export function InvestmentsView({
       currency: formCurrency,
     };
 
+    const today = new Date().toISOString();
     if (editingHolding) {
-      onUpdateHolding({ ...payload, id: editingHolding.id });
+      const priceChanged = editingHolding.currentPricePerShare !== curPrice;
+      onUpdateHolding({
+        ...payload,
+        id: editingHolding.id,
+        priceUpdatedAt: priceChanged ? today : editingHolding.priceUpdatedAt,
+      });
     } else {
-      onAddHolding(payload);
+      onAddHolding({ ...payload, priceUpdatedAt: today });
     }
     setShowHoldingForm(false);
     setEditingHolding(null);
@@ -444,23 +368,6 @@ export function InvestmentsView({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {onAskAi && (
-            <button
-              type="button"
-              onClick={() =>
-                onAskAi(
-                  tr(
-                    'Analiza nuestro portafolio de inversiones: diversificación, rendimiento por dividendos y cómo optimizar la reinversión.',
-                    'Analyze our investment portfolio: diversification, dividend yield, and how to optimize reinvestment.'
-                  )
-                )
-              }
-              className="inline-flex items-center gap-2 px-3.5 py-2 bg-[#DAEAFF]/80 dark:bg-[#022E5B] border border-[#A1C6F6] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-sm font-medium rounded-lg hover:bg-[#DAEAFF] dark:hover:bg-[#033A73] whitespace-nowrap transition-colors"
-            >
-              <Sparkles className="w-4 h-4 text-[#499BED]" />
-              {tr('Analizar portafolio IA', 'AI Portfolio Review')}
-            </button>
-          )}
           {onResetToZero && holdings.length > 0 && (
             <button
               type="button"
@@ -469,19 +376,6 @@ export function InvestmentsView({
             >
               <RefreshCw className="w-4 h-4" />
               {tr('Saldos de inversiones a $0', 'Reset investments to $0')}
-            </button>
-          )}
-          {holdings.length > 0 && (
-            <button
-              type="button"
-              onClick={handleRefreshMarketData}
-              disabled={marketStatus?.type === 'loading'}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-[#022E5B]/80 border border-[#C6DAF7] dark:border-[#1B4A7C] text-[#022E5B] dark:text-[#DAEAFF] text-sm font-medium rounded-lg hover:bg-[#DAEAFF]/50 dark:hover:bg-[#022E5B] whitespace-nowrap transition-colors disabled:opacity-60"
-            >
-              <TrendingUp className="w-4 h-4" />
-              {marketStatus?.type === 'loading'
-                ? tr('Actualizando…', 'Updating…')
-                : tr('Precios reales del mercado', 'Live market prices')}
             </button>
           )}
           <button
@@ -502,19 +396,6 @@ export function InvestmentsView({
           </button>
         </div>
       </div>
-
-      {marketStatus && marketStatus.type !== 'loading' && (
-        <div
-          role="status"
-          className={`rounded-lg border px-4 py-3 text-xs sm:text-sm ${
-            marketStatus.type === 'ok'
-              ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
-              : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800 text-red-800 dark:text-red-200'
-          }`}
-        >
-          {marketStatus.text}
-        </div>
-      )}
 
       {confirmZeroInvestments && onResetToZero && (
         <div className="p-4 rounded-xl bg-red-50/80 dark:bg-red-950/35 border border-red-200 dark:border-red-800/70 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -905,7 +786,11 @@ export function InvestmentsView({
                               e.preventDefault();
                               const val = Number(quickPriceVal);
                               if (val > 0) {
-                                onUpdateHolding({ ...h, currentPricePerShare: val });
+                                onUpdateHolding({
+                                  ...h,
+                                  currentPricePerShare: val,
+                                  priceUpdatedAt: new Date().toISOString(),
+                                });
                               }
                               setQuickPriceId(null);
                             }}
@@ -939,6 +824,16 @@ export function InvestmentsView({
                           >
                             {formatMoney(h.currentPricePerShare, h.currency)}
                           </button>
+                        )}
+                        {!isEditingPrice && (
+                          <div className="text-[10px] font-sans text-[#5A7694] dark:text-[#7FA6D6] mt-0.5">
+                            {h.priceUpdatedAt
+                              ? tr(
+                                  `act. ${new Date(h.priceUpdatedAt).toLocaleDateString('es-ES')}`,
+                                  `upd. ${new Date(h.priceUpdatedAt).toLocaleDateString('en-AU')}`
+                                )
+                              : tr('sin fecha', 'no date')}
+                          </div>
                         )}
                       </td>
                       <td className="py-3 px-4 text-right font-mono-num text-[#5A7694] dark:text-[#A1C6F6]">

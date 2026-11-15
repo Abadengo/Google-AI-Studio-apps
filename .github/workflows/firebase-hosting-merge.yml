@@ -1,0 +1,46 @@
+# Builds the static app and publishes it to Firebase Hosting (live channel) on every push to main.
+# Equivalent to what `firebase init hosting:github` generates. The deploy step needs the repository
+# secret FIREBASE_SERVICE_ACCOUNT (created by `firebase init hosting:github`, see README).
+name: Deploy to Firebase Hosting on merge
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    env:
+      HAS_FIREBASE_SECRET: ${{ secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install and build
+        run: npm ci && npm run build
+
+      - name: Type check
+        run: npm run lint
+
+      - name: Deploy to Firebase Hosting (live)
+        if: env.HAS_FIREBASE_SECRET == 'true'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+
+      - name: Deploy skipped
+        if: env.HAS_FIREBASE_SECRET != 'true'
+        run: echo "::warning::Falta el secreto FIREBASE_SERVICE_ACCOUNT; se compiló pero no se publicó. Ver README (Firebase Hosting)."
