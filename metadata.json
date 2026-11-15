@@ -1,0 +1,8 @@
+{
+  "name": "Midas Tracker",
+  "description": "App de finanzas para registrar ingresos, gastos, presupuestos, ahorro e inversiones directamente en tu navegador.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
