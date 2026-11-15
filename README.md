@@ -38,7 +38,7 @@ Importa movimientos desde **PDF, CSV e imágenes (JPG/PNG/WEBP)**.
 
 5. Abre <http://localhost:3000> en tu navegador.
 
-Para uso diario más rápido (versión optimizada): `npm start` (compila y arranca en modo producción).
+Para uso diario más rápido (versión optimizada): `npm run build` y luego `npm start` (modo producción).
 Para cerrar la app: `Ctrl + C` en la terminal.
 
 ## Datos compartidos en la nube (Firebase)
@@ -58,10 +58,10 @@ funciona sin conexión y sincroniza al volver.
 5. **Configuración del proyecto → Tus apps → Web (`</>`)**: registra una app y copia los valores a `.env`:
 
    ```
-   VITE_FIREBASE_API_KEY="..."
-   VITE_FIREBASE_AUTH_DOMAIN="tu-proyecto.firebaseapp.com"
-   VITE_FIREBASE_PROJECT_ID="tu-proyecto"
-   VITE_FIREBASE_APP_ID="..."
+   FIREBASE_API_KEY="..."
+   FIREBASE_AUTH_DOMAIN="tu-proyecto.firebaseapp.com"
+   FIREBASE_PROJECT_ID="tu-proyecto"
+   FIREBASE_APP_ID="..."
    ALLOWED_EMAILS="correo1@gmail.com,correo2@gmail.com"
    ```
 
@@ -89,14 +89,20 @@ Edita `ALLOWED_EMAILS` en `.env` (y en el servidor publicado) y vuelve a correr 
 permitidos entran y que cualquier otra cuenta, una cuenta sin verificar o un visitante sin sesión son
 rechazados, y lo apaga.
 
-### Publicar en Cloud Run
+### Publicar desde Google AI Studio / Cloud Run
 
-- Los valores `VITE_FIREBASE_*` se incorporan al compilar (`npm run build`), así que deben estar
-  definidos en el momento de la compilación.
-- En el servidor define `GEMINI_API_KEY`, `ALLOWED_EMAILS` y `VITE_FIREBASE_PROJECT_ID` (o
-  `FIREBASE_PROJECT_ID`). Las funciones de IA solo responden a un usuario con sesión iniciada cuyo
-  correo esté en `ALLOWED_EMAILS` (el servidor verifica el token de Google). Sin esas variables, en
-  producción la IA queda desactivada.
+El repositorio está listo para publicarse sin cambios de código:
+
+- `npm run build` compila la web (`dist/`) y el servidor (`server.js`, JavaScript plano).
+- `npm start` arranca `server.js` en modo producción: sirve `dist/` y la API, escucha en `0.0.0.0` y en
+  el puerto `PORT` (3000 por defecto). No usa Vite ni dependencias de desarrollo al ejecutarse.
+- Configura como **Secrets / variables de entorno** del servicio: `GEMINI_API_KEY`, `FIREBASE_API_KEY`,
+  `FIREBASE_AUTH_DOMAIN`, `FIREBASE_PROJECT_ID`, `FIREBASE_APP_ID` y `ALLOWED_EMAILS`. Se leen al
+  ejecutar, así que no hace falta recompilar para cambiarlas.
+- En Firebase → Authentication → Settings → **Authorized domains**, agrega el dominio publicado.
+- Las funciones de IA solo responden a un usuario con sesión iniciada cuyo correo esté en
+  `ALLOWED_EMAILS` (el servidor verifica el token de Google). Sin esas variables, en producción la IA
+  queda desactivada.
 
 ## Dónde se guardan tus datos
 

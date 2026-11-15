@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { verifyFirebaseIdToken } from './serverAuth.ts';
 import express, { type NextFunction, type Request, type Response } from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -78,6 +79,11 @@ function safeJsonParse<T>(raw: string | undefined, fallback: T): T {
 
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--prod');
 
+/** FIREBASE_X, also accepting the older VITE_FIREBASE_X name. */
+function readEnv(name: string): string {
+  return (process.env[name] || process.env[`VITE_${name}`] || '').trim();
+}
+
 const quoteCache = new Map<string, { at: number; quote: MarketQuote }>();
 
 async function fetchYahooQuote(symbol: string, range = '10y', interval = '1mo'): Promise<MarketQuote> {
@@ -118,13 +124,45 @@ async function startServer() {
   // Cloud Run / proxies: trust the first proxy so req.ip is the real client address.
   app.set('trust proxy', 1);
 
+  app.get('/api/health', (_req: Request, res: Response) => {
+    res.json({ ok: true });
+  });
+
+  // Public Firebase web config, read at RUNTIME so hosting secrets (AI Studio / Cloud Run) work without
+  // rebuilding. These values are not secret: access is enforced by the Firestore security rules.
+  app.get('/api/config', (_req: Request, res: Response) => {
+    const apiKey = readEnv('FIREBASE_API_KEY');
+    const projectId = readEnv('FIREBASE_PROJECT_ID');
+    const authDomain = readEnv('FIREBASE_AUTH_DOMAIN') || (projectId ? `${projectId}.firebaseapp.com` : '');
+    const emulatorHost =
+      !isProduction && process.env.FIREBASE_AUTH_EMULATOR_HOST
+        ? process.env.FIREBASE_AUTH_EMULATOR_HOST.split(':')[0]
+        : '';
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      firebase:
+        apiKey && projectId
+          ? {
+              apiKey,
+              authDomain,
+              projectId,
+              appId: readEnv('FIREBASE_APP_ID') || undefined,
+              storageBucket: readEnv('FIREBASE_STORAGE_BUCKET') || undefined,
+              messagingSenderId: readEnv('FIREBASE_MESSAGING_SENDER_ID') || undefined,
+            }
+          : null,
+      householdId: readEnv('FIREBASE_HOUSEHOLD_ID') || 'hogar',
+      emulatorHost,
+    });
+  });
+
   // A typical PDF statement (≈7 MB) is ≈10 MB once base64-encoded in JSON.
   app.use(express.json({ limit: '10mb' }));
 
   // --- Protection for the AI endpoints (they spend the Gemini key) ---
   // Only the signed-in Google accounts listed in ALLOWED_EMAILS can use them: the client sends its
   // Firebase ID token and the server verifies it (signature, project, expiry, verified email).
-  const firebaseProjectId = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || '';
+  const firebaseProjectId = readEnv('FIREBASE_PROJECT_ID');
   const allowedEmails = new Set(
     (process.env.ALLOWED_EMAILS || '')
       .split(',')
@@ -135,7 +173,7 @@ async function startServer() {
   if (!aiAuthConfigured) {
     console.warn(
       isProduction
-        ? 'Falta FIREBASE_PROJECT_ID/VITE_FIREBASE_PROJECT_ID o ALLOWED_EMAILS: las funciones de IA quedan DESACTIVADAS en producción.'
+        ? 'Falta FIREBASE_PROJECT_ID o ALLOWED_EMAILS: las funciones de IA quedan DESACTIVADAS en producción.'
         : 'Sin FIREBASE_PROJECT_ID / ALLOWED_EMAILS: la IA no verifica usuario (solo desarrollo local).'
     );
   }
@@ -719,10 +757,17 @@ ${conversationText}`;
   let closeVite: (() => Promise<void>) | null = null;
 
   if (isProduction) {
+    // Compiled frontend (npm run build). Resolved from the project root, where server.js lives.
     const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
+    if (!fs.existsSync(path.join(distPath, 'index.html'))) {
+      throw new Error(`No existe ${distPath}/index.html. Ejecuta "npm run build" antes de "npm start".`);
+    }
+    app.use(express.static(distPath, { index: false, maxAge: '1h' }));
+    // Hashed assets can be cached for a long time; index.html must always be fresh.
+    app.use('/assets', express.static(path.join(distPath, 'assets'), { immutable: true, maxAge: '1y' }));
     // SPA fallback (Express 4 syntax). API routes are registered above, so they take precedence.
     app.get('*', (_req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
@@ -739,9 +784,9 @@ ${conversationText}`;
     app.use(vite.middlewares);
   }
 
-  // Local use: listen only on this computer (127.0.0.1) so other devices on the network cannot use
-  // your Gemini key. Hosted environments (AI Studio / Cloud Run) set PORT and need 0.0.0.0.
-  const host = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
+  // Cloud Run / AI Studio: listen on 0.0.0.0 and the PORT they provide (3000 by default).
+  // AI endpoints are protected by Google sign-in, so listening on all interfaces is safe.
+  const host = process.env.HOST || '0.0.0.0';
   const httpServer = app.listen(port, host, () => {
     const shownHost = host === '0.0.0.0' ? 'localhost' : host;
     console.log(`Midas Tracker listo en http://${shownHost}:${port} (${isProduction ? 'producción' : 'desarrollo'})`);

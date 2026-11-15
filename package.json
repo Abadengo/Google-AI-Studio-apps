@@ -3,12 +3,15 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx server.ts",
-    "start": "vite build && tsx server.ts --prod",
-    "build": "vite build",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=server.js --log-level=warning",
+    "start": "node server.js --prod",
     "preview": "vite preview",
-    "clean": "rm -rf dist",
+    "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "firebase:rules": "node scripts/build-firestore-rules.mjs",
     "deploy:rules": "node scripts/build-firestore-rules.mjs --deploy",
@@ -19,6 +22,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",
+    "esbuild": "^0.28.0",
     "express": "^4.21.2",
     "firebase": "^12.19.0",
     "jose": "^6.2.17",
@@ -28,6 +32,7 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "recharts": "^3.10.1",
+    "tailwindcss": "^4.3.3",
     "vite": "^8.3.0"
   },
   "devDependencies": {
@@ -35,9 +40,6 @@
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "autoprefixer": "^10.4.21",
-    "esbuild": "^0.28.0",
-    "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"
   },

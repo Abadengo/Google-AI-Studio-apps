@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { onAuthStateChanged, type User } from 'firebase/auth';
+import { GoogleAuthProvider, onAuthStateChanged, signInWithCredential, type User } from 'firebase/auth';
 import { CloudUpload, FileJson, LogIn, LogOut, ShieldAlert } from 'lucide-react';
 import { useUiPreferences } from '../contexts/UiPreferencesContext';
 import { createInitialFinanceState } from '../data/defaultState';
 import { normalizeState } from '../data/migrations';
 import { CloudSync, importStateToCloud, loadCloudState } from '../firebase/cloudStore';
-import { getDb, getFirebaseAuth, HOUSEHOLD_ID, signInWithGoogle, signOutUser } from '../firebase/client';
+import { getDb, getEmulatorHost, getFirebaseAuth, getHouseholdId, signInWithGoogle, signOutUser } from '../firebase/client';
 import { LOCAL_STORAGE_KEY, readLocalBrowserState } from '../hooks/useFinanceStore';
 import { CURRENT_DATA_VERSION, type FinanceState } from '../types/finance';
 import { downloadBlob, getTodayISO } from '../utils/formatters';
@@ -65,7 +65,7 @@ export function AuthGate({ children }: { children: (session: CloudSession) => Re
     setPhase({ kind: 'loading', user });
     try {
       const db = getDb();
-      const res = await loadCloudState(db, HOUSEHOLD_ID);
+      const res = await loadCloudState(db, getHouseholdId());
       if (!res.exists || res.importStatus === 'in_progress') {
         setPhase({ kind: 'needsImport', user, resuming: res.importStatus === 'in_progress' });
         return;
@@ -75,7 +75,7 @@ export function AuthGate({ children }: { children: (session: CloudSession) => Re
         return;
       }
       const state = res.state!;
-      const sync = new CloudSync(db, HOUSEHOLD_ID, state, user.email || '');
+      const sync = new CloudSync(db, getHouseholdId(), state, user.email || '');
       // Data stored by an older app version was migrated in memory: save the upgraded version.
       if ((res.storedVersion || 1) < CURRENT_DATA_VERSION) sync.push({ ...state });
       const leftover = local.current;
@@ -105,9 +105,8 @@ export function AuthGate({ children }: { children: (session: CloudSession) => Re
 
   // Test hook (only with the Firebase emulator): sign in without the Google popup.
   useEffect(() => {
-    if (!import.meta.env.VITE_FIREBASE_EMULATOR_HOST) return;
+    if (!getEmulatorHost()) return;
     (window as unknown as Record<string, unknown>).__midasEmulatorSignIn = async (email: string) => {
-      const { GoogleAuthProvider, signInWithCredential } = await import('firebase/auth');
       const cred = GoogleAuthProvider.credential(
         JSON.stringify({ sub: `uid-${email}`, email, email_verified: true, name: email.split('@')[0] })
       );
@@ -118,7 +117,7 @@ export function AuthGate({ children }: { children: (session: CloudSession) => Re
   const runImport = async (user: User, state: FinanceState, source: 'localStorage' | 'backup_file' | 'blank') => {
     setPhase({ kind: 'importing', user, label: tr('Subiendo tus datos a la nube…', 'Uploading your data to the cloud…') });
     try {
-      await importStateToCloud(getDb(), HOUSEHOLD_ID, { ...state, isSampleData: false }, {
+      await importStateToCloud(getDb(), getHouseholdId(), { ...state, isSampleData: false }, {
         userEmail: user.email || '',
         source,
       });
