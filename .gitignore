@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Generated from firestore.rules.template (contains the allowed emails)
+firestore.rules
+.firebase/
+firebase-debug.log
+firestore-debug.log

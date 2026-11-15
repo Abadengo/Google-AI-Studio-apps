@@ -197,41 +197,34 @@ export interface AiAssistantResponse {
   proposedActions: AiProposedAction[];
 }
 
-const APP_PASSWORD_STORAGE_KEY = 'midas_app_password';
+/** Supplies the signed-in user's Firebase ID token (cloud mode). Null in local-only mode. */
+type TokenProvider = (forceRefresh?: boolean) => Promise<string>;
+let tokenProvider: TokenProvider | null = null;
 
-export function getStoredAppPassword(): string {
-  try {
-    return window.localStorage.getItem(APP_PASSWORD_STORAGE_KEY) || '';
-  } catch {
-    return '';
-  }
+export function setAuthTokenProvider(provider: TokenProvider | null) {
+  tokenProvider = provider;
 }
 
-export function storeAppPassword(password: string) {
-  try {
-    if (password) window.localStorage.setItem(APP_PASSWORD_STORAGE_KEY, password);
-    else window.localStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
-  } catch {
-    /* ignore */
-  }
+async function authHeaders(forceRefresh = false): Promise<Record<string, string>> {
+  const token = tokenProvider ? await tokenProvider(forceRefresh) : '';
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
-
-/** Fired when the server rejects the AI password so the app can ask for it again. */
-export const AUTH_REQUIRED_EVENT = 'midas:auth-required';
-
-export class AiAuthError extends Error {}
 
 async function postAiJson<T>(endpoint: string, body: unknown): Promise<T> {
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-App-Password': getStoredAppPassword() },
-    body: JSON.stringify(body),
-  });
+  const send = async (forceRefresh: boolean) =>
+    fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders(forceRefresh)) },
+      body: JSON.stringify(body),
+    });
+
+  let res = await send(false);
+  // An expired token is refreshed once and the call retried.
+  if (res.status === 401 && tokenProvider) res = await send(true);
 
   const payload = (await res.json().catch(() => ({}))) as { error?: string } & T;
-  if (res.status === 401) {
-    window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
-    throw new AiAuthError(payload.error || 'Se necesita la contraseña de la app para usar la IA.');
+  if (res.status === 401 || res.status === 403) {
+    throw new Error(payload.error || 'Tu sesión no está autorizada para usar la IA.');
   }
   if (res.status === 413) {
     throw new Error('El archivo es demasiado grande para analizarlo con IA (máximo ~7 MB).');
@@ -240,17 +233,6 @@ async function postAiJson<T>(endpoint: string, body: unknown): Promise<T> {
     throw new Error(payload.error || `Error ${res.status}`);
   }
   return payload;
-}
-
-/** Asks the server whether AI calls need a password and whether the stored one is valid. */
-export async function checkAiAuth(password: string): Promise<{ required: boolean; valid: boolean }> {
-  const res = await fetch('/api/auth/check', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-App-Password': password },
-    body: '{}',
-  });
-  const payload = (await res.json().catch(() => ({}))) as { required?: boolean; valid?: boolean };
-  return { required: Boolean(payload.required), valid: Boolean(payload.valid) };
 }
 
 export function fileToBase64(file: Blob): Promise<string> {

@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Globe, HardDriveDownload, Moon, Plus, RotateCcw, Sparkles, Sun, Upload, Users, X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Globe, HardDriveDownload, LogOut, Moon, Plus, RotateCcw, Sparkles, Sun, Upload, Users, X } from 'lucide-react';
 import { AccountsView } from './components/AccountsView';
 import { AiAgentDrawer } from './components/AiAgentDrawer';
 import { AiReclassifyModal } from './components/AiReclassifyModal';
@@ -8,22 +8,29 @@ import { BudgetsView } from './components/BudgetsView';
 import { CsvImportModal } from './components/CsvImportModal';
 import { DashboardView } from './components/DashboardView';
 import { InvestmentsView } from './components/InvestmentsView';
-import { AppPasswordModal } from './components/AppPasswordModal';
+import type { CloudSession } from './components/AuthGate';
+import { signOutUser } from './firebase/client';
+import { setAuthTokenProvider } from './utils/aiClient';
+import { getIdToken } from './firebase/client';
 import { ProfilesModal } from './components/ProfilesModal';
 import { ResetZeroModal } from './components/ResetZeroModal';
 import { TransactionModal } from './components/TransactionModal';
 import { TransactionsView } from './components/TransactionsView';
 import { useUiPreferences } from './contexts/UiPreferencesContext';
-import { useFinanceStore } from './hooks/useFinanceStore';
+import { readLocalBrowserState, useFinanceStore } from './hooks/useFinanceStore';
 import type { ProfileFilter, Transaction } from './types/finance';
-import { AUTH_REQUIRED_EVENT, checkAiAuth, getStoredAppPassword } from './utils/aiClient';
-import { getCurrentMonthKey, type CsvPreset } from './utils/formatters';
+import { downloadBlob, getCurrentMonthKey, getTodayISO, type CsvPreset } from './utils/formatters';
 
 type ActiveTab = 'dashboard' | 'transactions' | 'budgets' | 'accounts' | 'investments';
 
 const BACKUP_REMINDER_DAYS = 7;
 
-export default function App() {
+export default function App({ cloud }: { cloud?: CloudSession } = {}) {
+  // Stable options object (the store subscribes to the cloud once).
+  const storeOptions = useMemo(
+    () => (cloud ? { cloud: { initialState: cloud.initialState, sync: cloud.sync } } : {}),
+    [cloud]
+  );
   const {
     state,
     saveError,
@@ -58,7 +65,7 @@ export default function App() {
     clearToBlank,
     resetToZero,
     loadSampleData,
-  } = useFinanceStore();
+  } = useFinanceStore(storeOptions);
 
   const { theme, setTheme, lang, setLang, tr } = useUiPreferences();
 
@@ -78,26 +85,12 @@ export default function App() {
   const [isResetZeroOpen, setIsResetZeroOpen] = useState(false);
   const [hideSampleNotice, setHideSampleNotice] = useState(false);
   const [hideBackupReminder, setHideBackupReminder] = useState(false);
-  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [hideLocalLeftover, setHideLocalLeftover] = useState(false);
 
-  // AI password: ask once at startup when the server requires it and none is stored (or it's wrong),
-  // and again whenever an AI call is rejected with 401.
+  // AI calls are authorised with the signed-in user's Firebase ID token.
   useEffect(() => {
-    let cancelled = false;
-    checkAiAuth(getStoredAppPassword())
-      .then((res) => {
-        if (!cancelled && res.required && !res.valid) setIsPasswordModalOpen(true);
-      })
-      .catch(() => {
-        /* server unreachable: AI calls will report their own error */
-      });
-    const onAuthRequired = () => setIsPasswordModalOpen(true);
-    window.addEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
-    return () => {
-      cancelled = true;
-      window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
-    };
-  }, []);
+    setAuthTokenProvider(cloud ? getIdToken : null);
+  }, [cloud]);
 
   const daysSinceBackup = state.lastBackupAt
     ? Math.floor((Date.now() - new Date(state.lastBackupAt).getTime()) / (24 * 3600 * 1000))
@@ -364,6 +357,21 @@ export default function App() {
               <HardDriveDownload className="w-3.5 h-3.5 text-[#499BED]" />
               {tr('Respaldo y Moneda', 'Backup & Currency')} ({state.displayCurrency})
             </button>
+
+            {cloud && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await cloud.sync.flush();
+                  await signOutUser();
+                }}
+                title={cloud.user.email || ''}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#355170] dark:text-[#A1C6F6] bg-white dark:bg-[#022E5B]/80 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg hover:bg-[#DAEAFF]/50 dark:hover:bg-[#022E5B] transition-colors whitespace-nowrap shrink-0"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                {tr('Salir', 'Sign out')} ({cloud.user.email?.split('@')[0]})
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -375,10 +383,52 @@ export default function App() {
             role="alert"
             className="bg-red-50 dark:bg-red-950/50 border border-red-300 dark:border-red-800 text-red-800 dark:text-red-200 rounded-xl px-5 py-3.5 text-xs sm:text-sm"
           >
-            {tr(
-              `No se pudieron guardar los últimos cambios en este navegador (${saveError}). Descarga un respaldo .json ahora para no perder datos.`,
-              `Your latest changes could not be saved in this browser (${saveError}). Download a .json backup now to avoid losing data.`
-            )}
+            {cloud
+              ? tr(
+                  `Problema de sincronización con la nube: ${saveError} Los cambios se guardan en este dispositivo y se enviarán al recuperar la conexión.`,
+                  `Cloud sync problem: ${saveError} Changes are kept on this device and will be sent when the connection is back.`
+                )
+              : tr(
+                  `No se pudieron guardar los últimos cambios en este navegador (${saveError}). Descarga un respaldo .json ahora para no perder datos.`,
+                  `Your latest changes could not be saved in this browser (${saveError}). Download a .json backup now to avoid losing data.`
+                )}
+          </div>
+        )}
+        {cloud?.hasUnimportedLocalData && !hideLocalLeftover && (
+          <div
+            role="status"
+            className="bg-[#EAF2FF] dark:bg-[#062644] border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 text-xs sm:text-sm"
+          >
+            <span>
+              {tr(
+                'Este navegador tiene datos guardados de antes de la nube que no se importaron (la nube ya tenía datos). No se borraron: descárgalos si quieres conservarlos.',
+                'This browser has pre-cloud data that was not imported (the cloud already had data). It was not deleted: download it if you want to keep it.'
+              )}
+            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  const local = readLocalBrowserState();
+                  if (!local) return;
+                  downloadBlob(
+                    new Blob([JSON.stringify(local.state, null, 2)], { type: 'application/json' }),
+                    `midas_tracker_datos_locales_${getTodayISO()}.json`
+                  );
+                }}
+                className="px-3 py-1.5 bg-[#022E5B] dark:bg-[#499BED] text-white dark:text-[#031725] text-xs font-semibold rounded-lg"
+              >
+                {tr('Descargar datos locales', 'Download local data')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setHideLocalLeftover(true)}
+                className="p-1 text-[#5A7694] dark:text-[#A1C6F6]"
+                aria-label={tr('Ocultar aviso', 'Dismiss notice')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
         {showBackupReminder && (
@@ -389,12 +439,12 @@ export default function App() {
             <span>
               {daysSinceBackup === null
                 ? tr(
-                    'Tus datos viven solo en este navegador y todavía no descargaste ningún respaldo.',
-                    'Your data lives only in this browser and you have not downloaded a backup yet.'
+                    'Todavía no descargaste ningún respaldo .json de tus datos.',
+                    'You have not downloaded a .json backup of your data yet.'
                   )
                 : tr(
-                    `Han pasado ${daysSinceBackup} días desde tu último respaldo. Tus datos viven solo en este navegador.`,
-                    `It has been ${daysSinceBackup} days since your last backup. Your data lives only in this browser.`
+                    `Han pasado ${daysSinceBackup} días desde tu último respaldo .json.`,
+                    `It has been ${daysSinceBackup} days since your last .json backup.`
                   )}
             </span>
             <div className="flex items-center gap-3 shrink-0">
@@ -531,8 +581,12 @@ export default function App() {
         <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-3 text-xs text-[#496685] dark:text-[#A1C6F6]">
           <span>
             {tr(
-              'Midas Tracker · Datos guardados localmente en este navegador sin conexión bancaria.',
-              'Midas Tracker · Data stored locally in this browser with no bank connection.'
+              cloud
+                ? 'Midas Tracker · Datos sincronizados en la nube (Firestore) para las cuentas autorizadas, sin conexión bancaria.'
+                : 'Midas Tracker · Datos guardados localmente en este navegador sin conexión bancaria.',
+              cloud
+                ? 'Midas Tracker · Data synced to the cloud (Firestore) for the authorized accounts, no bank connection.'
+                : 'Midas Tracker · Data stored locally in this browser with no bank connection.'
             )}
           </span>
           <button
@@ -585,7 +639,7 @@ export default function App() {
         onBackupDownloaded={markBackupDone}
         onClearToBlank={clearToBlank}
         onOpenResetZero={() => setIsResetZeroOpen(true)}
-        onLoadSampleData={loadSampleData}
+        onLoadSampleData={cloud ? undefined : loadSampleData}
         onUpdateExchangeRates={updateExchangeRates}
         onSetDisplayCurrency={setDisplayCurrency}
       />
@@ -618,12 +672,6 @@ export default function App() {
         activeProfile={activeProfile}
         selectedMonth={selectedMonth}
         onApplyBatch={updateTransactionsBatch}
-      />
-
-      <AppPasswordModal
-        isOpen={isPasswordModalOpen}
-        onClose={() => setIsPasswordModalOpen(false)}
-        onAuthenticated={() => setIsPasswordModalOpen(false)}
       />
 
       <AiAgentDrawer

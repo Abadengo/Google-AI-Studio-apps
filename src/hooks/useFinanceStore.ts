@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { createInitialFinanceState, createSavingsConfig } from '../data/defaultState';
 import { normalizeState } from '../data/migrations';
+import type { CloudSync } from '../firebase/cloudStore';
 import {
   CURRENT_DATA_VERSION,
   type Account,
@@ -81,11 +82,46 @@ function retypeTransaction(tx: Transaction, nextType: Transaction['type']): Tran
   return { ...tx, type: nextType };
 }
 
-export function useFinanceStore() {
-  const [state, setState] = useState<FinanceState>(() => loadStateFromStorage());
+/** Reads the legacy browser-only data (used for the one-time import into the cloud). */
+export function readLocalBrowserState(): { state: FinanceState; isSample: boolean } | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const state = normalizeState(JSON.parse(raw));
+    return { state, isSample: state.isSampleData };
+  } catch {
+    return null;
+  }
+}
+
+export const LOCAL_STORAGE_KEY = STORAGE_KEY;
+
+export interface FinanceStoreOptions {
+  /** Cloud mode: state comes from Firestore and every change is synced there. */
+  cloud?: { initialState: FinanceState; sync: CloudSync };
+}
+
+export function useFinanceStore(options: FinanceStoreOptions = {}) {
+  const cloud = options.cloud;
+  const [state, setState] = useState<FinanceState>(() => cloud?.initialState ?? loadStateFromStorage());
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Cloud mode: listen to the other device and report sync errors.
   useEffect(() => {
+    if (!cloud) return;
+    const offError = cloud.sync.onError(setSaveError);
+    const unsubscribe = cloud.sync.subscribe(setState);
+    return () => {
+      offError();
+      unsubscribe();
+    };
+  }, [cloud]);
+
+  useEffect(() => {
+    if (cloud) {
+      cloud.sync.push(state);
+      return;
+    }
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       setSaveError(null);
@@ -95,7 +131,7 @@ export function useFinanceStore() {
         err instanceof Error ? err.message : 'No se pudo guardar en el almacenamiento del navegador'
       );
     }
-  }, [state]);
+  }, [state, cloud]);
 
   const setDisplayCurrency = useCallback((currency: CurrencyCode) => {
     setState((prev) => ({ ...prev, displayCurrency: currency }));
@@ -623,6 +659,7 @@ export function useFinanceStore() {
   return {
     state,
     saveError,
+    isCloud: Boolean(cloud),
     setDisplayCurrency,
     updateExchangeRates,
     addProfile,

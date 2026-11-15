@@ -14,7 +14,8 @@ interface BackupModalProps {
   onBackupDownloaded: () => void;
   onClearToBlank: () => void;
   onOpenResetZero?: () => void;
-  onLoadSampleData: () => void;
+  /** Undefined in cloud mode (sample data would overwrite the shared household). */
+  onLoadSampleData?: () => void;
   onUpdateExchangeRates: (rates: ExchangeRates) => void;
   onSetDisplayCurrency: (currency: CurrencyCode) => void;
 }
@@ -527,6 +528,7 @@ export function BackupModal({
                 </button>
               )}
 
+              {onLoadSampleData && (
               <button
                 type="button"
                 onClick={() => {
@@ -542,6 +544,7 @@ export function BackupModal({
                 <RotateCcw className="w-4 h-4" />
                 {tr('Cargar datos de ejemplo', 'Load sample data')}
               </button>
+              )}
             </div>
           </section>
         </div>

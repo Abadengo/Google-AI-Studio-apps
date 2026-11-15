@@ -1,0 +1,39 @@
+rules_version = '2';
+
+// Midas Tracker – Firestore security rules.
+// GENERATED FILE SOURCE: edit firestore.rules.template, then run `npm run firebase:rules`
+// (it fills in the allowed emails from ALLOWED_EMAILS in .env and writes firestore.rules).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Only these Google accounts can read or write anything.
+    function isAllowedUser() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() in [__ALLOWED_EMAILS__];
+    }
+
+    function isValidTransaction(tx) {
+      return tx.amount is number
+        && tx.amount >= 0
+        && tx.date is string
+        && tx.type in ['expense', 'income', 'transfer']
+        && tx.currency is string;
+    }
+
+    // Shared household: settings document + one document per transaction.
+    match /households/{householdId} {
+      allow read, write: if isAllowedUser();
+
+      match /transactions/{txId} {
+        allow read, delete: if isAllowedUser();
+        allow create, update: if isAllowedUser() && isValidTransaction(request.resource.data);
+      }
+    }
+
+    // Everything else is closed to everyone.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

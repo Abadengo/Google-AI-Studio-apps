@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import crypto from 'crypto';
+import { verifyFirebaseIdToken } from './serverAuth.ts';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -122,21 +122,23 @@ async function startServer() {
   app.use(express.json({ limit: '10mb' }));
 
   // --- Protection for the AI endpoints (they spend the Gemini key) ---
-  const appPassword = process.env.APP_PASSWORD || '';
-  if (!appPassword) {
+  // Only the signed-in Google accounts listed in ALLOWED_EMAILS can use them: the client sends its
+  // Firebase ID token and the server verifies it (signature, project, expiry, verified email).
+  const firebaseProjectId = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || '';
+  const allowedEmails = new Set(
+    (process.env.ALLOWED_EMAILS || '')
+      .split(',')
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const aiAuthConfigured = Boolean(firebaseProjectId && allowedEmails.size > 0);
+  if (!aiAuthConfigured) {
     console.warn(
       isProduction
-        ? 'APP_PASSWORD no está configurada: las funciones de IA quedan DESACTIVADAS en producción.'
-        : 'APP_PASSWORD no está configurada: las funciones de IA no piden contraseña (solo desarrollo local).'
+        ? 'Falta FIREBASE_PROJECT_ID/VITE_FIREBASE_PROJECT_ID o ALLOWED_EMAILS: las funciones de IA quedan DESACTIVADAS en producción.'
+        : 'Sin FIREBASE_PROJECT_ID / ALLOWED_EMAILS: la IA no verifica usuario (solo desarrollo local).'
     );
   }
-
-  const passwordMatches = (provided: unknown): boolean => {
-    if (!appPassword || typeof provided !== 'string') return false;
-    const a = crypto.createHash('sha256').update(provided).digest();
-    const b = crypto.createHash('sha256').update(appPassword).digest();
-    return crypto.timingSafeEqual(a, b);
-  };
 
   // Simple in-memory fixed-window rate limit per client IP (good enough for a single small instance).
   const AI_RATE_LIMIT_PER_MINUTE = Number(process.env.AI_RATE_LIMIT_PER_MINUTE) || 20;
@@ -161,35 +163,35 @@ async function startServer() {
     next();
   };
 
-  const requireAppPassword = (req: Request, res: Response, next: NextFunction) => {
-    if (!appPassword) {
+  const requireAllowedUser = async (req: Request, res: Response, next: NextFunction) => {
+    if (!aiAuthConfigured) {
       if (isProduction) {
-        res.status(503).json({ error: 'La IA está desactivada: configura APP_PASSWORD en el servidor.' });
+        res.status(503).json({ error: 'La IA está desactivada: configura FIREBASE_PROJECT_ID y ALLOWED_EMAILS en el servidor.' });
         return;
       }
       next();
       return;
     }
-    if (!passwordMatches(req.header('x-app-password'))) {
-      res.status(401).json({ error: 'Contraseña de la app incorrecta o ausente.' });
+    const header = req.header('authorization') || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    if (!token) {
+      res.status(401).json({ error: 'Inicia sesión para usar la IA.' });
       return;
     }
-    next();
+    try {
+      const user = await verifyFirebaseIdToken(token, firebaseProjectId);
+      if (!user.emailVerified || !allowedEmails.has(user.email)) {
+        res.status(403).json({ error: 'Esta cuenta no está autorizada para usar la IA.' });
+        return;
+      }
+      next();
+    } catch {
+      res.status(401).json({ error: 'Sesión inválida o vencida. Vuelve a iniciar sesión.' });
+    }
   };
 
-  // Rate limit first (also throttles password guessing), then the password check.
-  app.use('/api/ai', aiRateLimit, requireAppPassword);
-  app.use('/api/auth', aiRateLimit);
-
-  // Lets the client know whether a password is needed and whether the stored one is valid.
-  app.post('/api/auth/check', (req: Request, res: Response) => {
-    const required = Boolean(appPassword) || isProduction;
-    res.json({ required, valid: appPassword ? passwordMatches(req.header('x-app-password')) : !isProduction });
-  });
-
-  app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, model: MODEL_NAME, configured: Boolean(process.env.GEMINI_API_KEY) });
-  });
+  // Rate limit first (also throttles token guessing), then the user check.
+  app.use('/api/ai', aiRateLimit, requireAllowedUser);
 
   // 1. Document Reading & Multimodal Recognition + Post-Extraction Classification
   app.post('/api/ai/analyze-document', async (req: Request, res: Response) => {
