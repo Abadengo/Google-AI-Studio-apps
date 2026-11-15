@@ -11,7 +11,7 @@ import type {
   TransactionType,
   UserProfile,
 } from '../types/finance';
-import { CURRENCY_META, getProfileLabel, getTodayISO } from '../utils/formatters';
+import { CURRENCY_META, getProfileLabel, getTodayISO, parseNumericAmount } from '../utils/formatters';
 import { fileToBase64, parseQuickEntryWithAi } from '../utils/aiClient';
 
 interface TransactionModalProps {
@@ -265,13 +265,18 @@ export function TransactionModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const numericAmount = Number(amount);
+    // Accept "12,50" or "1,200.00" as well as plain numbers.
+    const numericAmount = Math.abs(parseNumericAmount(String(amount)));
     if (!numericAmount || numericAmount <= 0) {
       setError(tr('Ingresa un monto mayor a 0.', 'Enter an amount greater than 0.'));
       return;
     }
     if (!accountId) {
       setError(tr('Selecciona una cuenta.', 'Please select an account.'));
+      return;
+    }
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      setError(tr('Selecciona una fecha válida.', 'Please pick a valid date.'));
       return;
     }
     if (type === 'transfer' && (!toAccountId || toAccountId === accountId)) {

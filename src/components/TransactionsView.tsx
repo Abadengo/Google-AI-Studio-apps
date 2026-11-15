@@ -384,7 +384,10 @@ export function TransactionsView({
                         {catName(cat)}
                       </td>
                       <td className="py-3 px-4 text-xs text-[#355170] dark:text-[#A1C6F6] whitespace-nowrap">
-                        {acc?.name || tr('Cuenta', 'Account')}
+                        {acc?.name ||
+                          (tx.type === 'transfer' && !tx.accountId
+                            ? tr('Otra cuenta', 'Other account')
+                            : tr('Cuenta eliminada', 'Deleted account'))}
                         {toAcc ? ` → ${toAcc.name}` : ''}
                       </td>
                       <td className="py-3 px-4 text-xs text-[#355170] dark:text-[#A1C6F6] whitespace-nowrap">

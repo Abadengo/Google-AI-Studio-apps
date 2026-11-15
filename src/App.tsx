@@ -22,6 +22,7 @@ type ActiveTab = 'dashboard' | 'transactions' | 'budgets' | 'accounts' | 'moomoo
 export default function App() {
   const {
     state,
+    saveError,
     setDisplayCurrency,
     updateExchangeRates,
     addTransaction,
@@ -333,6 +334,17 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 max-w-[1280px] w-full mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-6">
+        {saveError && (
+          <div
+            role="alert"
+            className="bg-red-50 dark:bg-red-950/50 border border-red-300 dark:border-red-800 text-red-800 dark:text-red-200 rounded-xl px-5 py-3.5 text-xs sm:text-sm"
+          >
+            {tr(
+              `No se pudieron guardar los últimos cambios en este navegador (${saveError}). Descarga un respaldo .json ahora para no perder datos.`,
+              `Your latest changes could not be saved in this browser (${saveError}). Download a .json backup now to avoid losing data.`
+            )}
+          </div>
+        )}
         {state.isSampleData && !hideSampleNotice && (
           <div className="bg-[#022E5B] dark:bg-[#062644] border border-[#022E5B] dark:border-[#499BED]/30 text-[#DAEAFF] rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
             <p className="text-xs sm:text-sm">

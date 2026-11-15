@@ -2,12 +2,15 @@ import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
+import { parseYahooChart, type MarketQuote, type YahooChartResponse } from './src/utils/marketData.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const MODEL_NAME = 'gemini-4-hydrogen';
+// Model can be overridden with GEMINI_MODEL in .env (e.g. "gemini-2.5-flash").
+// "gemini-flash-latest" is Google's alias that always points to the current Flash model.
+const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-flash-latest';
 
 function getAiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -69,6 +72,41 @@ function safeJsonParse<T>(raw: string | undefined, fallback: T): T {
     } catch {
       return fallback;
     }
+  }
+}
+
+const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--prod');
+
+const quoteCache = new Map<string, { at: number; quote: MarketQuote }>();
+
+async function fetchYahooQuote(symbol: string, range = '10y', interval = '1mo'): Promise<MarketQuote> {
+  const cacheKey = `${symbol}|${range}|${interval}`;
+  const cached = quoteCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.quote;
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+      symbol
+    )}?range=${range}&interval=${interval}&events=div`;
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MidasTracker/1.0)' },
+      signal: AbortSignal.timeout(12000),
+    });
+    const json = (await r.json().catch(() => ({}))) as YahooChartResponse;
+    const quote = parseYahooChart(symbol, json);
+    if (quote.ok) quoteCache.set(cacheKey, { at: Date.now(), quote });
+    return quote;
+  } catch (err) {
+    return {
+      symbol,
+      ok: false,
+      error: err instanceof Error ? err.message : 'Network error',
+      price: 0,
+      currency: '',
+      name: symbol,
+      dividendYieldPct: 0,
+      historicalCagrPct: null,
+      historyYears: 0,
+    };
   }
 }
 
@@ -153,6 +191,7 @@ INSTRUCTIONS:
    - Clean "description" to a concise readable merchant/concept name.
    - Determine "type":
      * "transfer" ONLY when moving money between the user's own accounts (e.g., Transfer to Revolut, Transfer to/from GoalSaver, Internal Transfer) and set categoryId to "cat_transfer" if available.
+   - Set "direction" to "in" when money ENTERS this statement's account (deposits, credits, incoming transfers) and "out" when it LEAVES it (debits, purchases, outgoing transfers).
      * "income" for salary, interest, dividends, refunds, deposits.
      * "expense" for purchases, bills, subscriptions, stock/ETF BUYs.
    - Always make "amount" a positive number (> 0).
@@ -176,7 +215,6 @@ ${textContent ? `\nEXTRACTED TEXT / CSV CONTENT:\n${textContent.slice(0, 48000)}
           model: MODEL_NAME,
           contents: { parts },
           config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -216,6 +254,7 @@ ${textContent ? `\nEXTRACTED TEXT / CSV CONTENT:\n${textContent.slice(0, 48000)}
                       description: { type: Type.STRING },
                       amount: { type: Type.NUMBER },
                       type: { type: Type.STRING, description: '"expense" | "income" | "transfer"' },
+                      direction: { type: Type.STRING, description: '"in" | "out" relative to this statement account' },
                       currency: { type: Type.STRING },
                       categoryId: { type: Type.STRING },
                       classificationNote: { type: Type.STRING },
@@ -303,7 +342,6 @@ ${JSON.stringify(batch)}`;
           model: MODEL_NAME,
           contents: prompt,
           config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -396,7 +434,6 @@ ${promptText || '(See attached receipt/screenshot image)'}`,
           model: MODEL_NAME,
           contents: { parts },
           config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -480,7 +517,6 @@ ${conversationText}`;
           contents: prompt,
           config: {
             systemInstruction,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -539,12 +575,58 @@ ${conversationText}`;
     }
   });
 
+  // 5. Real market data (stock/ETF quotes, dividends, historical growth) and live FX rates.
+  //    Uses Yahoo Finance public chart endpoint (no API key required).
+  app.get('/api/market/quotes', async (req: Request, res: Response) => {
+    const raw = String(req.query.symbols || '');
+    const symbols = Array.from(
+      new Set(
+        raw
+          .split(',')
+          .map((s) => s.trim().toUpperCase())
+          .filter((s) => /^[A-Z0-9.\-=^]{1,20}$/.test(s))
+      )
+    ).slice(0, 40);
+    if (symbols.length === 0) {
+      res.status(400).json({ error: 'No valid symbols provided' });
+      return;
+    }
+    const results = await Promise.all(symbols.map((s) => fetchYahooQuote(s)));
+    res.json({ quotes: results, fetchedAt: new Date().toISOString() });
+  });
+
+  app.get('/api/market/fx', async (_req: Request, res: Response) => {
+    try {
+      // Yahoo "XXX=X" symbols give how many XXX one USD buys.
+      const codes = ['AUD', 'EUR', 'ARS', 'MXN', 'CLP'] as const;
+      const quotes = await Promise.all(codes.map((c) => fetchYahooQuote(`${c}=X`, '5d', '1d')));
+      const usdTo: Record<string, number> = { USD: 1 };
+      codes.forEach((c, i) => {
+        const q = quotes[i];
+        if (q.ok && q.price > 0) usdTo[c] = q.price;
+      });
+      if (!usdTo.AUD) {
+        res.status(502).json({ error: 'Could not fetch AUD exchange rate' });
+        return;
+      }
+      // Express every rate as "value of 1 unit in AUD" (the app's internal convention).
+      const rates: Record<string, number> = { AUD: 1 };
+      for (const c of ['USD', 'EUR', 'ARS', 'MXN', 'CLP']) {
+        if (usdTo[c]) rates[c] = usdTo.AUD / usdTo[c];
+      }
+      res.json({ rates, fetchedAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : 'FX fetch failed' });
+    }
+  });
+
   let closeVite: (() => Promise<void>) | null = null;
 
-  if (process.env.NODE_ENV === 'production') {
+  if (isProduction) {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
-    app.get('/{*splat}', (_req: Request, res: Response) => {
+    // SPA fallback (Express 4 syntax). API routes are registered above, so they take precedence.
+    app.get('*', (_req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
@@ -561,8 +643,12 @@ ${conversationText}`;
     app.use(vite.middlewares);
   }
 
-  const httpServer = app.listen(port, '0.0.0.0', () => {
-    console.log(`Midas Tracker server running on http://0.0.0.0:${port}`);
+  // Local use: listen only on this computer (127.0.0.1) so other devices on the network cannot use
+  // your Gemini key. Hosted environments (AI Studio / Cloud Run) set PORT and need 0.0.0.0.
+  const host = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
+  const httpServer = app.listen(port, host, () => {
+    const shownHost = host === '0.0.0.0' ? 'localhost' : host;
+    console.log(`Midas Tracker listo en http://${shownHost}:${port} (${isProduction ? 'producción' : 'desarrollo'})`);
   });
 
   httpServer.on('error', (err) => {

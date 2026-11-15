@@ -22,6 +22,7 @@ import type {
 } from '../types/finance';
 import {
   CURRENCY_META,
+  computeAccountBalances,
   convertCurrency,
   formatMoney,
   getGoalSaverForProfile,
@@ -99,41 +100,10 @@ export function AccountsGoalSaverView({
   }, [defaultOwnerId]);
 
   // Compute live account balances from initialBalance + transactions
-  const accountBalances = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const acc of state.accounts) {
-      map.set(acc.id, acc.initialBalance);
-    }
-    for (const tx of state.transactions) {
-      if (tx.type === 'income') {
-        const acc = state.accounts.find((a) => a.id === tx.accountId);
-        if (acc) {
-          const val = convertCurrency(tx.amount, tx.currency, acc.currency, state.exchangeRates);
-          map.set(acc.id, (map.get(acc.id) || 0) + val);
-        }
-      } else if (tx.type === 'expense') {
-        const acc = state.accounts.find((a) => a.id === tx.accountId);
-        if (acc) {
-          const val = convertCurrency(tx.amount, tx.currency, acc.currency, state.exchangeRates);
-          map.set(acc.id, (map.get(acc.id) || 0) - val);
-        }
-      } else if (tx.type === 'transfer') {
-        const fromAcc = state.accounts.find((a) => a.id === tx.accountId);
-        const toAcc = tx.toAccountId
-          ? state.accounts.find((a) => a.id === tx.toAccountId)
-          : undefined;
-        if (fromAcc) {
-          const val = convertCurrency(tx.amount, tx.currency, fromAcc.currency, state.exchangeRates);
-          map.set(fromAcc.id, (map.get(fromAcc.id) || 0) - val);
-        }
-        if (toAcc) {
-          const val = convertCurrency(tx.amount, tx.currency, toAcc.currency, state.exchangeRates);
-          map.set(toAcc.id, (map.get(toAcc.id) || 0) + val);
-        }
-      }
-    }
-    return map;
-  }, [state.accounts, state.transactions, state.exchangeRates]);
+  const accountBalances = useMemo(
+    () => computeAccountBalances(state.accounts, state.transactions, state.exchangeRates),
+    [state.accounts, state.transactions, state.exchangeRates]
+  );
 
   const visibleAccounts = useMemo(() => {
     return state.accounts.filter((a) => activeProfile === 'all' || a.owner === activeProfile);
@@ -174,37 +144,67 @@ export function AccountsGoalSaverView({
     };
   }, [state.goalSavers, state.profiles, activeProfile, tr]);
 
-  const simulationPoints = useMemo(() => {
-    return simulateGoalSaver({
-      initialBalance: goalSaverCombined.currentBalance,
-      monthlyContribution: goalSaverCombined.monthlyContribution,
-      baseRateAnnual: goalSaverCombined.baseRateAnnual,
-      bonusRateAnnual: goalSaverCombined.bonusRateAnnual,
-      months: horizonMonths,
-      includeBonus,
-      lang,
-    });
-  }, [goalSaverCombined, horizonMonths, includeBonus, lang]);
+  // Each profile earns its own rate (and only gets the bonus if it contributes), so the household
+  // projection is the sum of per-profile simulations rather than one simulation with averaged rates.
+  const goalSaverSources = useMemo(
+    () =>
+      activeProfile === 'all'
+        ? state.profiles.map((p) => getGoalSaverForProfile(state.goalSavers, p))
+        : [goalSaverCombined],
+    [activeProfile, state.profiles, state.goalSavers, goalSaverCombined]
+  );
 
-  const simulationWithoutBonus = useMemo(() => {
-    return simulateGoalSaver({
-      initialBalance: goalSaverCombined.currentBalance,
-      monthlyContribution: goalSaverCombined.monthlyContribution,
-      baseRateAnnual: goalSaverCombined.baseRateAnnual,
-      bonusRateAnnual: goalSaverCombined.bonusRateAnnual,
-      months: horizonMonths,
-      includeBonus: false,
-      lang,
+  const runCombinedSimulation = (withBonus: boolean) => {
+    const perProfile = goalSaverSources.map((gs) =>
+      simulateGoalSaver({
+        initialBalance: gs.currentBalance,
+        monthlyContribution: gs.monthlyContribution,
+        baseRateAnnual: gs.baseRateAnnual,
+        bonusRateAnnual: gs.bonusRateAnnual,
+        months: horizonMonths,
+        includeBonus: withBonus,
+        lang,
+      })
+    );
+    if (perProfile.length === 0) return [];
+    return perProfile[0].map((pt, i) => {
+      const sum = (key: keyof typeof pt) =>
+        perProfile.reduce((acc, list) => acc + (Number(list[i]?.[key]) || 0), 0);
+      return {
+        ...pt,
+        startingBalance: sum('startingBalance'),
+        contribution: sum('contribution'),
+        interestEarned: sum('interestEarned'),
+        endingBalance: sum('endingBalance'),
+        totalContributed: sum('totalContributed'),
+        totalInterest: sum('totalInterest'),
+      };
     });
-  }, [goalSaverCombined, horizonMonths, lang]);
+  };
+
+  const simulationPoints = useMemo(
+    () => runCombinedSimulation(includeBonus),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [goalSaverSources, horizonMonths, includeBonus, lang]
+  );
+
+  const simulationWithoutBonus = useMemo(
+    () => runCombinedSimulation(false),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [goalSaverSources, horizonMonths, lang]
+  );
 
   const lastPoint = simulationPoints[simulationPoints.length - 1];
   const lastNoBonus = simulationWithoutBonus[simulationWithoutBonus.length - 1];
-  const effectiveAnnualPct =
-    goalSaverCombined.baseRateAnnual +
-    (includeBonus && goalSaverCombined.monthlyContribution > 0
-      ? goalSaverCombined.bonusRateAnnual
-      : 0);
+  const effectiveAnnualPct = (() => {
+    const rateOf = (gs: GoalSaverProfile) =>
+      gs.baseRateAnnual + (includeBonus && gs.monthlyContribution > 0 ? gs.bonusRateAnnual : 0);
+    const totalBal = goalSaverSources.reduce((s, gs) => s + Math.max(0, gs.currentBalance), 0);
+    if (totalBal <= 0) {
+      return goalSaverSources.reduce((s, gs) => s + rateOf(gs), 0) / Math.max(1, goalSaverSources.length);
+    }
+    return goalSaverSources.reduce((s, gs) => s + rateOf(gs) * Math.max(0, gs.currentBalance), 0) / totalBal;
+  })();
 
   const handleCreateAccount = (e: React.FormEvent) => {
     e.preventDefault();
@@ -646,7 +646,7 @@ export function AccountsGoalSaverView({
                             }}
                             className="px-2 py-1 text-[11px] font-semibold bg-red-600 text-white rounded hover:bg-red-700"
                           >
-                            {tr('Eliminar', 'Delete')}
+                            {tr('Eliminar + movimientos', 'Delete + transactions')}
                           </button>
                           <button
                             type="button"

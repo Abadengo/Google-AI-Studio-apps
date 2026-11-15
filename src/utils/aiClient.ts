@@ -10,7 +10,91 @@ import type {
   TransactionType,
   UserProfile,
 } from '../types/finance';
-import { convertCurrency, getMonthKey, getTodayISO, type CsvPreset } from './formatters';
+import {
+  CURRENCY_META,
+  computeAccountBalances,
+  convertCurrency,
+  getMonthKey,
+  getTodayISO,
+  guessCategoryId,
+  normalizeDateToISO,
+  type CsvPreset,
+} from './formatters';
+
+const VALID_TX_TYPES: TransactionType[] = ['expense', 'income', 'transfer'];
+const VALID_PRESETS: Array<Exclude<CsvPreset, 'auto'>> = ['commbank', 'goalsaver', 'revolut', 'moomoo', 'generic'];
+const VALID_ACCOUNT_KINDS: AccountKind[] = ['commbank', 'goalsaver', 'revolut', 'moomoo', 'wise', 'cash', 'other'];
+
+function isCurrency(value: unknown): value is CurrencyCode {
+  return typeof value === 'string' && value.toUpperCase() in CURRENCY_META;
+}
+
+function asTxType(value: unknown): TransactionType | undefined {
+  const v = String(value || '').toLowerCase() as TransactionType;
+  return VALID_TX_TYPES.includes(v) ? v : undefined;
+}
+
+/** Guard against the model inventing category ids, types or currencies that don't exist in the app. */
+function sanitizeDocumentAnalysis(
+  raw: AiDocumentAnalysisResponse,
+  categories: Category[],
+  accounts: Account[],
+  profiles: UserProfile[]
+): AiDocumentAnalysisResponse {
+  const catIds = new Set(categories.map((c) => c.id));
+  const detectedCurrency: CurrencyCode = isCurrency(raw.detectedCurrency)
+    ? (raw.detectedCurrency.toUpperCase() as CurrencyCode)
+    : 'AUD';
+  const txs = Array.isArray(raw.transactions) ? raw.transactions : [];
+  const transactions: AiExtractedTransaction[] = [];
+  for (const tx of txs) {
+    const amount = Math.abs(Number(tx?.amount));
+    if (!tx || !Number.isFinite(amount) || amount <= 0) continue;
+    const type = asTxType(tx.type) || 'expense';
+    const description = String(tx.description || '').trim();
+    const categoryId = catIds.has(tx.categoryId) ? tx.categoryId : guessCategoryId(description, type);
+    const moomooAction = ['BUY', 'SELL', 'DIVIDEND'].includes(String(tx.moomooAction || '').toUpperCase())
+      ? (String(tx.moomooAction).toUpperCase() as 'BUY' | 'SELL' | 'DIVIDEND')
+      : '';
+    const direction = tx.direction === 'in' || tx.direction === 'out' ? tx.direction : '';
+    transactions.push({
+      ...tx,
+      date: normalizeDateToISO(String(tx.date || '')),
+      description,
+      amount,
+      type,
+      direction,
+      currency: isCurrency(tx.currency) ? (tx.currency.toUpperCase() as CurrencyCode) : detectedCurrency,
+      categoryId: catIds.has(categoryId) ? categoryId : categories[0]?.id || categoryId,
+      ticker: String(tx.ticker || '').toUpperCase().trim(),
+      moomooAction,
+      shares: Number(tx.shares) > 0 ? Number(tx.shares) : undefined,
+      price: Number(tx.price) > 0 ? Number(tx.price) : undefined,
+    });
+  }
+
+  const profileIds = new Set(profiles.map((p) => p.id));
+  const suggested = raw.suggestedNewAccount;
+  return {
+    ...raw,
+    owner: profileIds.has(raw.owner) ? raw.owner : profiles[0]?.id || raw.owner,
+    preset: VALID_PRESETS.includes(raw.preset) ? raw.preset : 'generic',
+    targetAccountId: accounts.some((a) => a.id === raw.targetAccountId) ? raw.targetAccountId : '',
+    detectedCurrency,
+    closingBalance: Number(raw.closingBalance) > 0 ? Number(raw.closingBalance) : 0,
+    summary: String(raw.summary || ''),
+    suggestedNewAccount: suggested
+      ? {
+          ...suggested,
+          kind: VALID_ACCOUNT_KINDS.includes(suggested.kind) ? suggested.kind : 'other',
+          currency: isCurrency(suggested.currency)
+            ? (suggested.currency.toUpperCase() as CurrencyCode)
+            : detectedCurrency,
+        }
+      : undefined,
+    transactions,
+  };
+}
 import type { DetectionConfidence } from './statementDetector';
 
 export interface AiExtractedTransaction {
@@ -18,6 +102,8 @@ export interface AiExtractedTransaction {
   description: string;
   amount: number;
   type: TransactionType;
+  /** "in" = money entered the statement account, "out" = money left it. */
+  direction?: 'in' | 'out' | '';
   currency: CurrencyCode;
   categoryId: string;
   classificationNote?: string;
@@ -142,7 +228,7 @@ export async function analyzeDocumentWithAi(params: {
   activeProfile: ProfileFilter;
   lang: 'es' | 'en';
 }): Promise<AiDocumentAnalysisResponse> {
-  return postAiJson<AiDocumentAnalysisResponse>('/api/ai/analyze-document', {
+  const raw = await postAiJson<AiDocumentAnalysisResponse>('/api/ai/analyze-document', {
     fileName: params.fileName,
     mimeType: params.mimeType,
     base64Data: params.base64Data,
@@ -169,6 +255,7 @@ export async function analyzeDocumentWithAi(params: {
     activeProfile: params.activeProfile,
     lang: params.lang,
   });
+  return sanitizeDocumentAnalysis(raw, params.categories, params.accounts, params.profiles || []);
 }
 
 export async function classifyTransactionsWithAi(params: {
@@ -177,7 +264,7 @@ export async function classifyTransactionsWithAi(params: {
   accounts: Account[];
   lang: 'es' | 'en';
 }): Promise<{ summary: string; suggestions: AiClassificationSuggestion[] }> {
-  return postAiJson<{ summary: string; suggestions: AiClassificationSuggestion[] }>(
+  const raw = await postAiJson<{ summary: string; suggestions: AiClassificationSuggestion[] }>(
     '/api/ai/classify-transactions',
     {
       transactions: params.transactions.slice(0, 120).map((tx) => ({
@@ -201,6 +288,24 @@ export async function classifyTransactionsWithAi(params: {
       lang: params.lang,
     }
   );
+  const catIds = new Set(params.categories.map((c) => c.id));
+  const txIds = new Set(params.transactions.map((t) => t.id));
+  const suggestions = (Array.isArray(raw.suggestions) ? raw.suggestions : [])
+    .filter((sug) => sug && txIds.has(String(sug.id)))
+    .map((sug) => {
+      const original = params.transactions.find((t) => t.id === String(sug.id))!;
+      const suggestedType = asTxType(sug.suggestedType) || original.type;
+      return {
+        ...sug,
+        id: String(sug.id),
+        suggestedType,
+        suggestedCategoryId: catIds.has(sug.suggestedCategoryId)
+          ? sug.suggestedCategoryId
+          : original.categoryId,
+        suggestedDescription: String(sug.suggestedDescription || '').trim() || original.description,
+      };
+    });
+  return { summary: String(raw.summary || ''), suggestions };
 }
 
 export async function parseQuickEntryWithAi(params: {
@@ -261,46 +366,7 @@ export function buildFinancialSnapshot(
   const netSavings = monthIncome - monthExpenses;
   const savingsRatePct = monthIncome > 0 ? Number(((netSavings / monthIncome) * 100).toFixed(1)) : 0;
 
-  const accountBalances = new Map<string, number>();
-  for (const acc of state.accounts) accountBalances.set(acc.id, acc.initialBalance);
-  for (const tx of state.transactions) {
-    if (tx.type === 'income') {
-      const a = state.accounts.find((x) => x.id === tx.accountId);
-      if (a) {
-        accountBalances.set(
-          a.id,
-          (accountBalances.get(a.id) || 0) +
-            convertCurrency(tx.amount, tx.currency, a.currency, state.exchangeRates)
-        );
-      }
-    } else if (tx.type === 'expense') {
-      const a = state.accounts.find((x) => x.id === tx.accountId);
-      if (a) {
-        accountBalances.set(
-          a.id,
-          (accountBalances.get(a.id) || 0) -
-            convertCurrency(tx.amount, tx.currency, a.currency, state.exchangeRates)
-        );
-      }
-    } else if (tx.type === 'transfer') {
-      const from = state.accounts.find((x) => x.id === tx.accountId);
-      const to = tx.toAccountId ? state.accounts.find((x) => x.id === tx.toAccountId) : undefined;
-      if (from) {
-        accountBalances.set(
-          from.id,
-          (accountBalances.get(from.id) || 0) -
-            convertCurrency(tx.amount, tx.currency, from.currency, state.exchangeRates)
-        );
-      }
-      if (to) {
-        accountBalances.set(
-          to.id,
-          (accountBalances.get(to.id) || 0) +
-            convertCurrency(tx.amount, tx.currency, to.currency, state.exchangeRates)
-        );
-      }
-    }
-  }
+  const accountBalances = computeAccountBalances(state.accounts, state.transactions, state.exchangeRates);
 
   const paidMap = state.fixedExpensePaidByMonth[selectedMonth] || {};
 

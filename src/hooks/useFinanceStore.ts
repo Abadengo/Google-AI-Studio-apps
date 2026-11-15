@@ -58,58 +58,139 @@ function hydrateProfilesAndGoalSavers(
   return { profiles, goalSavers };
 }
 
+function uid(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const VALID_CURRENCIES = new Set<CurrencyCode>(['AUD', 'USD', 'EUR', 'ARS', 'MXN', 'CLP']);
+
+function sanitizeRates(raw: unknown, fallback: ExchangeRates): ExchangeRates {
+  const out: ExchangeRates = { ...fallback };
+  if (raw && typeof raw === 'object') {
+    for (const code of Object.keys(fallback) as CurrencyCode[]) {
+      const v = Number((raw as Record<string, unknown>)[code]);
+      if (Number.isFinite(v) && v > 0) out[code] = v;
+    }
+  }
+  out.AUD = 1;
+  return out;
+}
+
+/**
+ * Turns any persisted / restored JSON into a valid FinanceState, filling missing pieces and
+ * dropping malformed rows so a damaged backup can't crash the app.
+ */
+function normalizeState(parsed: Partial<FinanceState>): FinanceState {
+  const fallback = createInitialFinanceState(false);
+  const { profiles, goalSavers } = hydrateProfilesAndGoalSavers(
+    parsed.profiles,
+    parsed.goalSavers,
+    fallback.goalSavers
+  );
+
+  const transactions = (Array.isArray(parsed.transactions) ? parsed.transactions : [])
+    .filter(
+      (t): t is Transaction =>
+        Boolean(t) &&
+        typeof t.id === 'string' &&
+        typeof t.date === 'string' &&
+        Number.isFinite(Number(t.amount))
+    )
+    .map((t) => ({
+      ...t,
+      amount: Math.abs(Number(t.amount)),
+      currency: VALID_CURRENCIES.has(t.currency) ? t.currency : 'AUD',
+      description: String(t.description ?? ''),
+      accountId: t.accountId ?? '',
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  return {
+    version: parsed.version ?? 1,
+    displayCurrency:
+      parsed.displayCurrency && VALID_CURRENCIES.has(parsed.displayCurrency) ? parsed.displayCurrency : 'AUD',
+    exchangeRates: sanitizeRates(parsed.exchangeRates, fallback.exchangeRates),
+    profiles,
+    // An empty list is a valid user choice (all accounts deleted): don't resurrect sample accounts.
+    accounts: Array.isArray(parsed.accounts)
+      ? parsed.accounts.map((a) => ({ ...a, initialBalance: Number(a.initialBalance) || 0 }))
+      : fallback.accounts,
+    categories:
+      Array.isArray(parsed.categories) && parsed.categories.length > 0
+        ? parsed.categories
+        : fallback.categories,
+    transactions,
+    budgets: Array.isArray(parsed.budgets) ? parsed.budgets : fallback.budgets,
+    goalSavers,
+    moomooHoldings: Array.isArray(parsed.moomooHoldings) ? parsed.moomooHoldings : [],
+    fixedExpenses: Array.isArray(parsed.fixedExpenses)
+      ? parsed.fixedExpenses
+      : parsed.isSampleData
+      ? DEFAULT_FIXED_EXPENSES
+      : [],
+    fixedExpensePaidByMonth:
+      parsed.fixedExpensePaidByMonth && typeof parsed.fixedExpensePaidByMonth === 'object'
+        ? parsed.fixedExpensePaidByMonth
+        : {},
+    isSampleData: Boolean(parsed.isSampleData),
+  };
+}
+
 function loadStateFromStorage(): FinanceState {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
       return createInitialFinanceState(true);
     }
-    const parsed = JSON.parse(raw) as Partial<FinanceState>;
-    const fallback = createInitialFinanceState(false);
-    const { profiles, goalSavers } = hydrateProfilesAndGoalSavers(
-      parsed.profiles,
-      parsed.goalSavers,
-      fallback.goalSavers
-    );
-
-    return {
-      version: parsed.version ?? 1,
-      displayCurrency: parsed.displayCurrency ?? 'AUD',
-      exchangeRates: { ...fallback.exchangeRates, ...(parsed.exchangeRates || {}) },
-      profiles,
-      accounts: Array.isArray(parsed.accounts) && parsed.accounts.length > 0 ? parsed.accounts : fallback.accounts,
-      categories:
-        Array.isArray(parsed.categories) && parsed.categories.length > 0
-          ? parsed.categories
-          : fallback.categories,
-      transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
-      budgets: Array.isArray(parsed.budgets) ? parsed.budgets : fallback.budgets,
-      goalSavers,
-      moomooHoldings: Array.isArray(parsed.moomooHoldings) ? parsed.moomooHoldings : [],
-      fixedExpenses: Array.isArray(parsed.fixedExpenses)
-        ? parsed.fixedExpenses
-        : parsed.isSampleData
-        ? DEFAULT_FIXED_EXPENSES
-        : [],
-      fixedExpensePaidByMonth:
-        parsed.fixedExpensePaidByMonth && typeof parsed.fixedExpensePaidByMonth === 'object'
-          ? parsed.fixedExpensePaidByMonth
-          : {},
-      isSampleData: Boolean(parsed.isSampleData),
-    };
-  } catch {
+    return normalizeState(JSON.parse(raw) as Partial<FinanceState>);
+  } catch (err) {
+    // Never silently overwrite unreadable data: keep a copy before falling back to samples.
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (raw) window.localStorage.setItem(`${STORAGE_KEY}_corrupt_${Date.now()}`, raw);
+    } catch {
+      /* ignore */
+    }
+    console.error('No se pudieron leer los datos guardados:', err);
     return createInitialFinanceState(true);
   }
 }
 
+/**
+ * Changing a transaction's type must keep the money flowing in the same direction:
+ * an inflow (income) turned into a transfer becomes an incoming transfer to the same account,
+ * and an incoming transfer turned back into income/expense goes back to its destination account.
+ */
+function retypeTransaction(tx: Transaction, nextType: Transaction['type']): Transaction {
+  if (nextType === tx.type) return tx;
+  if (nextType === 'transfer') {
+    if (tx.type === 'income') {
+      return { ...tx, type: 'transfer', accountId: '', toAccountId: tx.accountId };
+    }
+    return { ...tx, type: 'transfer' };
+  }
+  // transfer -> income/expense
+  if (tx.type === 'transfer') {
+    const next: Transaction = { ...tx, type: nextType, accountId: tx.accountId || tx.toAccountId || '' };
+    delete next.toAccountId;
+    return next;
+  }
+  return { ...tx, type: nextType };
+}
+
 export function useFinanceStore() {
   const [state, setState] = useState<FinanceState>(() => loadStateFromStorage());
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      setSaveError(null);
     } catch (err) {
       console.error('Error guardando en localStorage:', err);
+      setSaveError(
+        err instanceof Error ? err.message : 'No se pudo guardar en el almacenamiento del navegador'
+      );
     }
   }, [state]);
 
@@ -123,7 +204,7 @@ export function useFinanceStore() {
 
   // Transactions
   const addTransaction = useCallback((tx: Omit<Transaction, 'id'>) => {
-    const id = `tx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const id = uid('tx');
     setState((prev) => ({
       ...prev,
       isSampleData: false,
@@ -173,10 +254,10 @@ export function useFinanceStore() {
           const patch = patchMap.get(tx.id);
           if (!patch) return tx;
           changedCount++;
+          const retyped = patch.type !== undefined ? retypeTransaction(tx, patch.type) : tx;
           return {
-            ...tx,
+            ...retyped,
             ...(patch.categoryId !== undefined ? { categoryId: patch.categoryId } : {}),
-            ...(patch.type !== undefined ? { type: patch.type } : {}),
             ...(patch.description !== undefined ? { description: patch.description } : {}),
             ...(patch.owner !== undefined ? { owner: patch.owner } : {}),
             ...(patch.accountId !== undefined ? { accountId: patch.accountId } : {}),
@@ -208,7 +289,7 @@ export function useFinanceStore() {
 
   // Categories
   const addCategory = useCallback((cat: Omit<Category, 'id'>) => {
-    const id = `cat_${Date.now()}`;
+    const id = uid('cat');
     setState((prev) => ({
       ...prev,
       categories: [...prev.categories, { ...cat, id }],
@@ -218,7 +299,7 @@ export function useFinanceStore() {
 
   // Accounts
   const addAccount = useCallback((acc: Omit<Account, 'id'>) => {
-    const id = `acc_${Date.now()}`;
+    const id = uid('acc');
     setState((prev) => ({
       ...prev,
       accounts: [...prev.accounts, { ...acc, id }],
@@ -237,6 +318,28 @@ export function useFinanceStore() {
     setState((prev) => ({
       ...prev,
       accounts: prev.accounts.filter((a) => a.id !== id),
+      // Movements that only lived in the deleted account are removed; transfers that touched it
+      // keep the other side (as a one-sided transfer) so the remaining account balance is unchanged.
+      transactions: prev.transactions
+        .filter((t) => {
+          if (t.type === 'transfer') {
+            const from = t.accountId === id ? '' : t.accountId;
+            const to = t.toAccountId === id ? '' : t.toAccountId || '';
+            return Boolean(from || to);
+          }
+          return t.accountId !== id;
+        })
+        .map((t) => {
+          if (t.type !== 'transfer') return t;
+          if (t.accountId === id) return { ...t, accountId: '' };
+          if (t.toAccountId === id) {
+            const next = { ...t };
+            delete next.toAccountId;
+            return next;
+          }
+          return t;
+        }),
+      fixedExpenses: prev.fixedExpenses.filter((f) => f.accountId !== id),
     }));
   }, []);
 
@@ -258,7 +361,7 @@ export function useFinanceStore() {
       }
       const newBudget: Budget = {
         ...budget,
-        id: `bud_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        id: uid('bud'),
       };
       return {
         ...prev,
@@ -284,7 +387,7 @@ export function useFinanceStore() {
         .replace(/[^a-z0-9]+/g, '_')
         .replace(/^_+|_+$/g, '')
         .slice(0, 18) || 'user';
-    const id = `prof_${slug}_${Date.now().toString(36).slice(-4)}`;
+    const id = `prof_${slug}_${Math.random().toString(36).slice(2, 8)}`;
     const newProfile: UserProfile = {
       ...profile,
       id,
@@ -384,7 +487,7 @@ export function useFinanceStore() {
 
   // Moomoo Holdings
   const addMoomooHolding = useCallback((holding: Omit<MoomooHolding, 'id'>) => {
-    const id = `moo_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const id = uid('moo');
     setState((prev) => ({
       ...prev,
       isSampleData: false,
@@ -492,7 +595,7 @@ export function useFinanceStore() {
   }, []);
 
   const addFixedExpense = useCallback((item: Omit<FixedExpense, 'id'>) => {
-    const id = `fix_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const id = uid('fix');
     setState((prev) => ({
       ...prev,
       isSampleData: false,
@@ -516,19 +619,7 @@ export function useFinanceStore() {
       if (!parsed || !Array.isArray(parsed.accounts) || !Array.isArray(parsed.transactions)) {
         return { ok: false, error: 'El archivo no tiene el formato de respaldo válido.' };
       }
-      const fallback = createInitialFinanceState(false);
-      const { profiles, goalSavers } = hydrateProfilesAndGoalSavers(
-        parsed.profiles,
-        parsed.goalSavers,
-        fallback.goalSavers
-      );
-      setState({
-        ...parsed,
-        profiles,
-        goalSavers,
-        fixedExpenses: Array.isArray(parsed.fixedExpenses) ? parsed.fixedExpenses : [],
-        fixedExpensePaidByMonth: parsed.fixedExpensePaidByMonth || {},
-      });
+      setState(normalizeState({ ...parsed, fixedExpenses: Array.isArray(parsed.fixedExpenses) ? parsed.fixedExpenses : [] }));
       return { ok: true };
     } catch {
       return { ok: false, error: 'No se pudo leer el archivo JSON. Verifica que no esté dañado.' };
@@ -640,6 +731,7 @@ export function useFinanceStore() {
 
   return {
     state,
+    saveError,
     setDisplayCurrency,
     updateExchangeRates,
     addProfile,

@@ -26,7 +26,7 @@ import {
   askFinancialAssistant,
   type AiProposedAction,
 } from '../utils/aiClient';
-import { getProfileLabel, getTodayISO } from '../utils/formatters';
+import { CURRENCY_META, getProfileLabel, getTodayISO, normalizeDateToISO } from '../utils/formatters';
 
 export type AgentTabContext = 'dashboard' | 'transactions' | 'budgets' | 'accounts' | 'moomoo';
 
@@ -243,23 +243,38 @@ export function AiAgentDrawer({
     return state.profiles[0]?.id || 'abdiel';
   };
 
+  // The model can hallucinate ids/currencies: only accept values that exist in the app.
+  const validCategory = (id: string | undefined, fallback: string) =>
+    id && state.categories.some((c) => c.id === id) ? id : fallback;
+  const validCurrency = (code: string | undefined, fallback: CurrencyCode): CurrencyCode =>
+    code && code.toUpperCase() in CURRENCY_META ? (code.toUpperCase() as CurrencyCode) : fallback;
+  const validTxType = (t: string | undefined): TransactionType | undefined =>
+    t === 'income' || t === 'expense' || t === 'transfer' ? t : undefined;
+
   const handleApplyAction = (actionKey: string, action: AiProposedAction) => {
     if (appliedKeys[actionKey]) return;
 
     if (action.actionType === 'reclassify_tx' && action.txId) {
+      const tx = state.transactions.find((t) => t.id === action.txId);
+      if (!tx) return;
       onReclassifyBatch([
         {
           id: action.txId,
-          categoryId: action.categoryId,
-          type: action.txType,
-          description: action.description,
+          categoryId: validCategory(action.categoryId, tx.categoryId),
+          type: validTxType(action.txType) || tx.type,
+          description: action.description?.trim() || tx.description,
         },
       ]);
       setAppliedKeys((prev) => ({ ...prev, [actionKey]: true }));
       return;
     }
 
-    if (action.actionType === 'upsert_budget' && action.categoryId && action.monthlyLimit) {
+    if (
+      action.actionType === 'upsert_budget' &&
+      action.categoryId &&
+      state.categories.some((c) => c.id === action.categoryId) &&
+      Number(action.monthlyLimit) > 0
+    ) {
       const resolvedOwner =
         action.owner === 'all'
           ? 'all'
@@ -269,8 +284,8 @@ export function AiAgentDrawer({
       onUpsertBudget({
         categoryId: action.categoryId,
         owner: resolvedOwner,
-        monthlyLimit: action.monthlyLimit,
-        currency: (action.currency || state.displayCurrency) as CurrencyCode,
+        monthlyLimit: Number(action.monthlyLimit),
+        currency: validCurrency(action.currency, state.displayCurrency),
       });
       setAppliedKeys((prev) => ({ ...prev, [actionKey]: true }));
       return;
@@ -286,9 +301,9 @@ export function AiAgentDrawer({
       onAddFixedExpense({
         name: action.description || action.title,
         owner,
-        amount: action.amount,
-        currency: (action.currency || fallbackAccount?.currency || state.displayCurrency) as CurrencyCode,
-        categoryId: action.categoryId || 'cat_servicios',
+        amount: Math.abs(Number(action.amount)),
+        currency: validCurrency(action.currency, fallbackAccount?.currency || state.displayCurrency),
+        categoryId: validCategory(action.categoryId, 'cat_servicios'),
         accountId: fallbackAccount?.id || '',
         dueDay: Math.min(28, Math.max(1, Number(action.dueDay) || 5)),
       });
@@ -308,11 +323,13 @@ export function AiAgentDrawer({
       onAddTransaction({
         owner,
         type: txType,
-        date: action.date || getTodayISO(),
-        amount: action.amount,
-        currency: (action.currency || fallbackAccount?.currency || state.displayCurrency) as CurrencyCode,
-        categoryId:
-          action.categoryId || (txType === 'income' ? 'cat_otros_ingresos' : 'cat_otros_gastos'),
+        date: action.date ? normalizeDateToISO(action.date) : getTodayISO(),
+        amount: Math.abs(Number(action.amount)),
+        currency: validCurrency(action.currency, fallbackAccount?.currency || state.displayCurrency),
+        categoryId: validCategory(
+          action.categoryId,
+          txType === 'income' ? 'cat_otros_ingresos' : txType === 'transfer' ? 'cat_transfer' : 'cat_otros_gastos'
+        ),
         accountId: fallbackAccount?.id || '',
         description: action.description || action.title,
         source: 'manual',
@@ -340,7 +357,7 @@ export function AiAgentDrawer({
         name: action.description || action.title || tr('Cuenta nueva', 'New account'),
         owner,
         kind,
-        currency: (action.currency || state.displayCurrency) as CurrencyCode,
+        currency: validCurrency(action.currency, state.displayCurrency),
         initialBalance: Number(action.amount) || 0,
         notes: action.notes || action.detail || undefined,
       });
@@ -349,16 +366,31 @@ export function AiAgentDrawer({
     }
 
     if (action.actionType === 'delete_account') {
-      const needle = (action.description || action.title || '').toLowerCase();
+      // Only an exact id, or a name that matches exactly ONE account. Fuzzy matching could delete
+      // another person's account (e.g. "CommBank" matched the first CommBank of any profile).
+      const needle = (action.description || '').trim().toLowerCase();
+      const byName = needle ? state.accounts.filter((a) => a.name.trim().toLowerCase() === needle) : [];
       const targetAcc =
-        state.accounts.find((a) => a.id === action.accountId) ||
-        (needle
-          ? state.accounts.find((a) => a.name.toLowerCase().includes(needle))
-          : undefined);
-      if (targetAcc) {
-        onDeleteAccount(targetAcc.id);
-        setAppliedKeys((prev) => ({ ...prev, [actionKey]: true }));
+        state.accounts.find((a) => a.id === action.accountId) || (byName.length === 1 ? byName[0] : undefined);
+      if (!targetAcc) {
+        setError(
+          tr(
+            'No se encontró una única cuenta que coincida; elimínala manualmente desde Cuentas.',
+            'Could not find a single matching account; delete it manually from Accounts.'
+          )
+        );
+        return;
       }
+      const ownerName = getProfileLabel(targetAcc.owner, state.profiles);
+      const ok = window.confirm(
+        tr(
+          `¿Eliminar la cuenta "${targetAcc.name}" de ${ownerName}? Se borrarán también sus movimientos.`,
+          `Delete account "${targetAcc.name}" (${ownerName})? Its transactions will also be removed.`
+        )
+      );
+      if (!ok) return;
+      onDeleteAccount(targetAcc.id);
+      setAppliedKeys((prev) => ({ ...prev, [actionKey]: true }));
     }
   };
 

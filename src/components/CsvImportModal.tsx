@@ -38,6 +38,7 @@ import {
   guessCategoryId,
   normalizeDateToISO,
   parseCsvText,
+  downloadBlob,
   parseNumericAmount,
   type CsvPreset,
 } from '../utils/formatters';
@@ -88,6 +89,8 @@ interface CsvImportModalProps {
 
 interface PreviewRow {
   rowIndex: number;
+  /** true when money entered the statement account (positive amount / credit). */
+  isInflow: boolean;
   selected: boolean;
   isDuplicate: boolean;
   duplicateSource: DuplicateSource;
@@ -128,6 +131,9 @@ interface ImportedFileEntry {
   colDate: number;
   colDesc: number;
   colAmount: number;
+  /** Separate Debit / Credit columns (Westpac, ANZ, ING, NAB…). -1 when not used. */
+  colDebit: number;
+  colCredit: number;
   colCurrency: number;
   colTicker: number;
   colSide: number;
@@ -169,11 +175,31 @@ interface ImportedFileEntry {
 
 function computeColumnIndices(hdrs: string[]) {
   const lower = hdrs.map((h) => h.toLowerCase().trim());
-  const findIdx = (terms: string[]) => lower.findIndex((h) => terms.some((t) => h.includes(t)));
+  const findIdx = (terms: string[], exclude: string[] = []) =>
+    lower.findIndex((h) => terms.some((t) => h.includes(t)) && !exclude.some((x) => h.includes(x)));
 
   const dIdx = findIdx(['completed date', 'started date', 'date', 'fecha', 'time']);
-  const descIdx = findIdx(['description', 'merchant', 'name', 'concepto', 'detalle', 'memo']);
-  const amtIdx = findIdx(['total amount', 'amount', 'monto', 'importe', 'value', 'valor']);
+  const descIdx = findIdx([
+    'description',
+    'narrative',
+    'merchant',
+    'details',
+    'payee',
+    'name',
+    'concepto',
+    'descripción',
+    'descripcion',
+    'detalle',
+    'memo',
+    'reference',
+  ]);
+  const debitIdx = findIdx(['debit', 'withdrawal', 'money out', 'paid out', 'cargo', 'débito', 'debito', 'egreso']);
+  const creditIdx = findIdx(['credit', 'deposit', 'money in', 'paid in', 'abono', 'crédito', 'credito', 'ingreso']);
+  const amtIdx = findIdx(
+    ['total amount', 'amount', 'monto', 'importe', 'value', 'valor'],
+    ['debit', 'credit', 'balance', 'saldo', 'fee', 'withdrawal', 'deposit']
+  );
+  const useDebitCredit = amtIdx < 0 && (debitIdx >= 0 || creditIdx >= 0);
   const currIdx = findIdx(['currency', 'moneda', 'ccy']);
   const tickIdx = findIdx(['symbol', 'ticker', 'code', 'código']);
   const sideIdx = findIdx(['side', 'direction', 'action', 'type', 'operación']);
@@ -182,7 +208,14 @@ function computeColumnIndices(hdrs: string[]) {
 
   return {
     colDate: dIdx >= 0 ? dIdx : 0,
-    colAmount: amtIdx >= 0 ? amtIdx : Math.min(1, Math.max(0, hdrs.length - 1)),
+    colAmount:
+      amtIdx >= 0
+        ? amtIdx
+        : useDebitCredit
+        ? Math.max(debitIdx, creditIdx)
+        : Math.min(1, Math.max(0, hdrs.length - 1)),
+    colDebit: useDebitCredit ? debitIdx : -1,
+    colCredit: useDebitCredit ? creditIdx : -1,
     colDesc: descIdx >= 0 ? descIdx : Math.min(2, Math.max(0, hdrs.length - 1)),
     colCurrency: currIdx,
     colTicker: tickIdx,
@@ -190,6 +223,24 @@ function computeColumnIndices(hdrs: string[]) {
     colQty: qtyIdx,
     colPrice: priceIdx,
   };
+}
+
+/** Signed amount of a raw row: positive = money in, negative = money out. */
+function getSignedRowAmount(
+  entry: Pick<ImportedFileEntry, 'colAmount' | 'colDebit' | 'colCredit'>,
+  row: string[]
+): number {
+  if (entry.colDebit >= 0 || entry.colCredit >= 0) {
+    const debit = entry.colDebit >= 0 ? Math.abs(parseNumericAmount(row[entry.colDebit] || '')) : 0;
+    const credit = entry.colCredit >= 0 ? Math.abs(parseNumericAmount(row[entry.colCredit] || '')) : 0;
+    return credit - debit;
+  }
+  return parseNumericAmount(row[entry.colAmount] || '0');
+}
+
+/** Guess whether an internal transfer line is incoming when the source doesn't say. */
+function looksLikeIncomingTransfer(description: string): boolean {
+  return /\b(from|desde|received|recibid[ao]|deposit|dep[oó]sito|credit|abono)\b/i.test(description);
 }
 
 export function CsvImportModal({
@@ -251,8 +302,7 @@ export function CsvImportModal({
         const rawDate = row[entry.colDate] || '';
         const date = normalizeDateToISO(rawDate);
         const rawDesc = row[entry.colDesc] || '';
-        const rawAmtStr = row[entry.colAmount] || '0';
-        const signedAmount = parseNumericAmount(rawAmtStr);
+        const signedAmount = getSignedRowAmount(entry, row);
 
         let curr: CurrencyCode = entry.defaultCurrency;
         if (entry.colCurrency >= 0 && row[entry.colCurrency]) {
@@ -319,6 +369,7 @@ export function CsvImportModal({
 
         previewRows.push({
           rowIndex: idx,
+          isInflow: signedAmount > 0 || (signedAmount === 0 && txType === 'income'),
           selected: override?.selected ?? !isDuplicate,
           isDuplicate,
           duplicateSource,
@@ -536,7 +587,12 @@ export function CsvImportModal({
 
     const headers = ['Date', 'Amount', 'Description', 'Currency', 'Symbol', 'Side', 'Qty', 'Price'];
     const rawRows: string[][] = aiRes.transactions.map((tx) => {
-      const signedAmt = tx.type === 'expense' ? -Math.abs(tx.amount) : Math.abs(tx.amount);
+      const isOutflow =
+        tx.direction === 'out' ||
+        (tx.direction !== 'in' &&
+          (tx.type === 'expense' ||
+            (tx.type === 'transfer' && !looksLikeIncomingTransfer(tx.description))));
+      const signedAmt = isOutflow ? -Math.abs(tx.amount) : Math.abs(tx.amount);
       return [
         tx.date,
         String(signedAmt),
@@ -607,6 +663,8 @@ export function CsvImportModal({
       rawRows,
       colDate: 0,
       colAmount: 1,
+      colDebit: -1,
+      colCredit: -1,
       colDesc: 2,
       colCurrency: 3,
       colTicker: 4,
@@ -671,7 +729,7 @@ export function CsvImportModal({
         const rowsToClassify =
           cf?.previewRows ||
           entrySnapshot.rawRows.map((row, idx) => {
-            const signedAmt = parseNumericAmount(row[entrySnapshot.colAmount] || '0');
+            const signedAmt = getSignedRowAmount(entrySnapshot, row);
             return {
               rowIndex: idx,
               date: normalizeDateToISO(row[entrySnapshot.colDate] || ''),
@@ -880,6 +938,8 @@ export function CsvImportModal({
         colDate: 0,
         colDesc: 2,
         colAmount: 1,
+        colDebit: -1,
+        colCredit: -1,
         colCurrency: -1,
         colTicker: -1,
         colSide: -1,
@@ -936,6 +996,8 @@ export function CsvImportModal({
       colDate: 0,
       colDesc: 2,
       colAmount: 1,
+      colDebit: -1,
+      colCredit: -1,
       colCurrency: -1,
       colTicker: -1,
       colSide: -1,
@@ -1079,12 +1141,7 @@ export function CsvImportModal({
   const handleDownloadSampleCsv = (kind: 'commbank' | 'goalsaver' | 'revolut' | 'moomoo') => {
     const csv = getSampleCsvContent(kind);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `ejemplo_${kind}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `ejemplo_${kind}.csv`);
   };
 
   const handleDownloadSamplePdf = (kind: 'commbank' | 'goalsaver' | 'revolut' | 'moomoo') => {
@@ -1092,12 +1149,7 @@ export function CsvImportModal({
     const holderName = getProfileLabel(sampleOwner, profiles);
     const bytes = generateSamplePdfStatementBytes(kind, sampleOwner, holderName);
     const blob = new Blob([new Uint8Array(bytes)], { type: 'application/pdf' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `statement_${sampleOwner}_${kind}.pdf`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `statement_${sampleOwner}_${kind}.pdf`);
   };
 
   const appendEntryIfNotLoaded = (entry: ImportedFileEntry) => {
@@ -1263,12 +1315,16 @@ export function CsvImportModal({
           allMoomooTrades.push(...trades);
         }
 
-        const txRows = isMoomooMode
-          ? selectedRows.filter((r) => !r.ticker || r.moomooAction === 'DIVIDEND')
-          : selectedRows;
+        // BUY/SELL rows go to the portfolio; if the user turned that off they are kept as movements
+        // instead of being silently dropped.
+        const txRows =
+          isMoomooMode && entry.importMoomooToPortfolio
+            ? selectedRows.filter((r) => !r.ticker || r.moomooAction === 'DIVIDEND')
+            : selectedRows;
 
         if (txRows.length > 0 && targetAccount) {
           for (const r of txRows) {
+            const isIncomingTransfer = r.type === 'transfer' && r.isInflow;
             allTransactionsToInsert.push({
               owner: entry.owner,
               type: r.type,
@@ -1276,7 +1332,9 @@ export function CsvImportModal({
               amount: r.amount,
               currency: r.currency,
               categoryId: r.categoryId,
-              accountId: targetAccount.id,
+              // Incoming transfer from another own account: credit this account (source unknown).
+              accountId: isIncomingTransfer ? '' : targetAccount.id,
+              ...(isIncomingTransfer ? { toAccountId: targetAccount.id } : {}),
               description: r.description,
               source: sourceTag,
             });
@@ -2205,15 +2263,32 @@ export function CsvImportModal({
                         {tr('Columna Monto', 'Amount column')}
                       </label>
                       <select
-                        value={activeComputed.entry.colAmount}
+                        value={
+                          activeComputed.entry.colDebit >= 0 || activeComputed.entry.colCredit >= 0
+                            ? -2
+                            : activeComputed.entry.colAmount
+                        }
                         onChange={(e) =>
-                          updateFileEntry(activeComputed.entry.id, (prev) => ({
-                            ...prev,
-                            colAmount: Number(e.target.value),
-                          }))
+                          updateFileEntry(activeComputed.entry.id, (prev) => {
+                            const v = Number(e.target.value);
+                            if (v === -2) {
+                              const lowerHdrs = prev.headers.map((h) => h.toLowerCase());
+                              const debit = lowerHdrs.findIndex((h) => /debit|withdrawal|money out|cargo|d[eé]bito/.test(h));
+                              const credit = lowerHdrs.findIndex((h) => /credit|deposit|money in|abono|cr[eé]dito/.test(h));
+                              return { ...prev, colDebit: debit, colCredit: credit };
+                            }
+                            return { ...prev, colAmount: v, colDebit: -1, colCredit: -1 };
+                          })
                         }
                         className="w-full px-2.5 py-1.5 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg bg-white dark:bg-[#031725] text-[#031725] dark:text-[#DAEAFF]"
                       >
+                        {activeComputed.entry.headers.some((h) =>
+                          /debit|credit|withdrawal|deposit|cargo|abono|d[eé]bito|cr[eé]dito/i.test(h)
+                        ) && (
+                          <option value={-2}>
+                            {tr('Débito / Crédito (columnas separadas)', 'Debit / Credit (separate columns)')}
+                          </option>
+                        )}
                         {activeComputed.entry.headers.map((h, i) => (
                           <option key={i} value={i}>
                             {h}

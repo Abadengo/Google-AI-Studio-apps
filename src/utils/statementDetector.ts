@@ -166,7 +166,8 @@ function presetToAccountKind(
 
 function detectExternalBankBrand(normalizedCtx: string): { label: string; kind: AccountKind } | null {
   for (const bank of KNOWN_EXTERNAL_BANKS) {
-    if (bank.keywords.some((kw) => countWordMatches(normalizedCtx, kw) > 0 || normalizedCtx.includes(kw))) {
+    // Whole-word matching only: substring matching made "nab" hit "unable" and "citi" hit "city".
+    if (bank.keywords.some((kw) => countWordMatches(normalizedCtx, kw) > 0)) {
       return { label: bank.label, kind: bank.kind };
     }
   }
@@ -217,9 +218,14 @@ function findDirectAccountMatch(
 
   for (const acc of accounts) {
     const sourceMeta = `${acc.name} ${acc.notes || ''}`;
-    const digitTokens = sourceMeta.match(/\d{4,}/g) || [];
+    // Account-number style tokens only (ignore years such as "2025" that appear in every statement).
+    const digitTokens = (sourceMeta.match(/\d{4,}/g) || []).filter(
+      (d) => !(d.length === 4 && /^(19|20)\d{2}$/.test(d))
+    );
     for (const digits of digitTokens) {
-      if (compactDoc.includes(digits) || digitsOnlyDoc.includes(digits)) {
+      const wordRx = new RegExp(`(?:^|\\D)${digits}(?:\\D|$)`);
+      // The concatenated-digits check only makes sense for long numbers (e.g. "06 2000 12345678").
+      if (wordRx.test(compactDoc) || (digits.length >= 8 && digitsOnlyDoc.includes(digits))) {
         return acc;
       }
     }

@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Check, Download, Globe, Moon, RotateCcw, Sun, Trash2, Upload, X } from 'lucide-react';
 import { useUiPreferences } from '../contexts/UiPreferencesContext';
 import type { CurrencyCode, ExchangeRates, FinanceState } from '../types/finance';
-import { CURRENCY_META, getProfileLabel, getTodayISO } from '../utils/formatters';
+import { CURRENCY_META, downloadBlob, getProfileLabel, getTodayISO } from '../utils/formatters';
+import { fetchLiveExchangeRates } from '../utils/marketData';
 
 interface BackupModalProps {
   isOpen: boolean;
@@ -14,6 +15,49 @@ interface BackupModalProps {
   onLoadSampleData: () => void;
   onUpdateExchangeRates: (rates: ExchangeRates) => void;
   onSetDisplayCurrency: (currency: CurrencyCode) => void;
+}
+
+/** Quote a CSV cell and neutralise spreadsheet formulas (=, +, -, @) coming from bank descriptions. */
+function csvCell(value: string): string {
+  const v = /^[=+\-@]/.test(value) ? `'${value}` : value;
+  return `"${v.replace(/"/g, '""')}"`;
+}
+
+/** Number input that lets the user type freely ("0.00…") and only commits valid positive values. */
+function RateInput({
+  value,
+  onCommit,
+  className,
+}: {
+  value: number;
+  onCommit: (v: number) => void;
+  className: string;
+}) {
+  const [text, setText] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    if (!focused) setText(String(value));
+  }, [value, focused]);
+  return (
+    <input
+      type="number"
+      step="any"
+      min="0"
+      inputMode="decimal"
+      value={text}
+      onFocus={() => setFocused(true)}
+      onBlur={() => {
+        setFocused(false);
+        setText(String(value));
+      }}
+      onChange={(e) => {
+        setText(e.target.value);
+        const v = Number(e.target.value);
+        if (Number.isFinite(v) && v > 0) onCommit(v);
+      }}
+      className={className}
+    />
+  );
 }
 
 export function BackupModal({
@@ -30,18 +74,14 @@ export function BackupModal({
   const { theme, setTheme, lang, setLang, tr, catName } = useUiPreferences();
   const [statusMsg, setStatusMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [fxLoading, setFxLoading] = useState(false);
 
   if (!isOpen) return null;
 
   const handleDownloadJsonBackup = () => {
     const json = JSON.stringify(state, null, 2);
     const blob = new Blob([json], { type: 'application/json;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `midas_tracker_backup_${getTodayISO()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `midas_tracker_backup_${getTodayISO()}.json`);
     setStatusMsg({
       type: 'ok',
       text: tr(
@@ -66,10 +106,10 @@ export function BackupModal({
       const cat = state.categories.find((c) => c.id === t.categoryId);
       const catLabel = catName(cat, t.categoryId);
       const acc = state.accounts.find((a) => a.id === t.accountId)?.name || t.accountId;
-      const safeDesc = `"${t.description.replace(/"/g, '""')}"`;
+      const safeDesc = csvCell(t.description);
       return [
         t.date,
-        getProfileLabel(t.owner, state.profiles),
+        csvCell(getProfileLabel(t.owner, state.profiles)),
         t.type === 'income'
           ? tr('Ingreso', 'Income')
           : t.type === 'expense'
@@ -77,19 +117,15 @@ export function BackupModal({
           : tr('Transferencia', 'Transfer'),
         t.amount.toFixed(2),
         t.currency,
-        `"${catLabel}"`,
-        `"${acc}"`,
+        csvCell(catLabel),
+        csvCell(acc || ''),
         safeDesc,
       ].join(',');
     });
     const csv = [header.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `midas_tracker_transactions_${getTodayISO()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    // BOM so Excel opens accents (á, ñ) correctly.
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    downloadBlob(blob, `midas_tracker_transactions_${getTodayISO()}.csv`);
     setStatusMsg({
       type: 'ok',
       text: tr(
@@ -101,7 +137,16 @@ export function BackupModal({
 
   const handleUploadRestore = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    // Reset so choosing the same file again still triggers onChange.
+    e.target.value = '';
     if (!file) return;
+    const ok = window.confirm(
+      tr(
+        `Restaurar "${file.name}" reemplazará TODOS los datos actuales de este navegador. Si no los respaldaste, descárgalos primero. ¿Continuar?`,
+        `Restoring "${file.name}" will replace ALL current data in this browser. Download a backup first if you need it. Continue?`
+      )
+    );
+    if (!ok) return;
     const reader = new FileReader();
     reader.onload = () => {
       const result = onRestoreState(String(reader.result || ''));
@@ -309,6 +354,46 @@ export function BackupModal({
               </select>
             </div>
 
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={fxLoading}
+                onClick={async () => {
+                  setFxLoading(true);
+                  try {
+                    const live = await fetchLiveExchangeRates();
+                    const next: ExchangeRates = { ...state.exchangeRates };
+                    for (const code of Object.keys(next) as CurrencyCode[]) {
+                      const v = Number(live[code]);
+                      if (Number.isFinite(v) && v > 0) next[code] = Number(v.toPrecision(6));
+                    }
+                    next.AUD = 1;
+                    onUpdateExchangeRates(next);
+                    setStatusMsg({
+                      type: 'ok',
+                      text: tr('Tipos de cambio actualizados con datos del mercado.', 'Exchange rates updated from live market data.'),
+                    });
+                  } catch (err) {
+                    setStatusMsg({
+                      type: 'err',
+                      text: tr(
+                        `No se pudieron obtener tipos de cambio en vivo (${err instanceof Error ? err.message : ''}).`,
+                        `Could not fetch live exchange rates (${err instanceof Error ? err.message : ''}).`
+                      ),
+                    });
+                  } finally {
+                    setFxLoading(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#022E5B] dark:text-[#DAEAFF] bg-white dark:bg-[#022E5B]/80 border border-[#C6DAF7] dark:border-[#1B4A7C] rounded-lg hover:bg-[#DAEAFF]/50 disabled:opacity-60"
+              >
+                <Globe className="w-3.5 h-3.5 text-[#499BED]" />
+                {fxLoading
+                  ? tr('Actualizando…', 'Updating…')
+                  : tr('Actualizar con tipos de cambio reales', 'Update with live exchange rates')}
+              </button>
+            </div>
+
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {(['USD', 'EUR', 'MXN', 'ARS', 'CLP'] as CurrencyCode[]).map((code) => (
                 <div
@@ -318,17 +403,9 @@ export function BackupModal({
                   <label className="block text-xs font-medium text-[#355170] dark:text-[#A1C6F6] mb-1">
                     {tr(`1 ${code} equivale en AUD:`, `1 ${code} equals in AUD:`)}
                   </label>
-                  <input
-                    type="number"
-                    step="0.0001"
-                    min="0.0001"
+                  <RateInput
                     value={state.exchangeRates[code]}
-                    onChange={(e) =>
-                      onUpdateExchangeRates({
-                        ...state.exchangeRates,
-                        [code]: Math.max(0.0001, Number(e.target.value) || 0.0001),
-                      })
-                    }
+                    onCommit={(v) => onUpdateExchangeRates({ ...state.exchangeRates, [code]: v })}
                     className="w-full px-2.5 py-1.5 bg-white dark:bg-[#031725] border border-[#C6DAF7] dark:border-[#1B4A7C] rounded text-sm font-mono-num text-[#031725] dark:text-[#DAEAFF]"
                   />
                 </div>

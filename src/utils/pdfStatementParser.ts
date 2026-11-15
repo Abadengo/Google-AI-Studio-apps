@@ -68,13 +68,58 @@ function isNoiseLine(text: string): boolean {
 
 function detectCurrencyFromText(text: string): CurrencyCode | undefined {
   const upper = text.toUpperCase();
-  if (/\bAUD\b|A\$/.test(upper)) return 'AUD';
-  if (/\bUSD\b|US\$/.test(upper)) return 'USD';
-  if (/\bEUR\b|€/.test(upper)) return 'EUR';
-  if (/\bMXN\b|MX\$/.test(upper)) return 'MXN';
-  if (/\bCLP\b|CLP\$/.test(upper)) return 'CLP';
-  if (/\bARS\b/.test(upper)) return 'ARS';
-  return undefined;
+  // Pick the currency mentioned most often (a USD broker statement that mentions AUD once is still USD).
+  const patterns: Array<[CurrencyCode, RegExp]> = [
+    ['AUD', /\bAUD\b|A\$/g],
+    ['USD', /\bUSD\b|US\$/g],
+    ['EUR', /\bEUR\b|€/g],
+    ['MXN', /\bMXN\b|MX\$/g],
+    ['CLP', /\bCLP\b|CLP\$/g],
+    ['ARS', /\bARS\b/g],
+  ];
+  let best: CurrencyCode | undefined;
+  let bestCount = 0;
+  for (const [code, rx] of patterns) {
+    const count = (upper.match(rx) || []).length;
+    if (count > bestCount) {
+      best = code;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function shiftYear(iso: string, delta: number): string {
+  return `${Number(iso.slice(0, 4)) + delta}${iso.slice(4)}`;
+}
+
+/**
+ * Statements often print dates without a year ("14 Dec"), so the parser has to guess it.
+ * Fix the two typical mistakes: dates that land in the future (Dec rows of a Dec→Jan statement
+ * dated with the newer year) and a backwards jump of more than 6 months in an ascending list
+ * (Jan rows dated with the older year).
+ */
+function fixInferredYears(rows: string[][], dateCol = 0): string[][] {
+  const tomorrow = new Date(Date.now() + 24 * 3600 * 1000);
+  const limit = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(
+    tomorrow.getDate()
+  ).padStart(2, '0')}`;
+  const monthIndex = (iso: string) => Number(iso.slice(0, 4)) * 12 + Number(iso.slice(5, 7));
+  let prev: string | null = null;
+  return rows.map((row) => {
+    let d = row[dateCol];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d || '')) return row;
+    if (prev && monthIndex(d) - monthIndex(prev) < -6) {
+      const bumped = shiftYear(d, 1);
+      if (bumped <= limit) d = bumped;
+    }
+    if (d > limit) d = shiftYear(d, -1);
+    prev = d;
+    if (d === row[dateCol]) return row;
+    const next = [...row];
+    next[dateCol] = d;
+    return next;
+  });
 }
 
 function detectStatementYear(lines: PdfVisualLine[]): number {
@@ -617,7 +662,7 @@ function tryParseBankColumnGuided(
       } else if (nearestKey === 'creditX' && cellMoney.length > 0) {
         creditVal = Math.abs(cellMoney[0].value);
       } else if (nearestKey === 'balanceX' && cellMoney.length > 0) {
-        balanceVal = Math.abs(cellMoney[cellMoney.length - 1].value);
+        balanceVal = cellMoney[cellMoney.length - 1].value;
       } else if (nearestKey === 'amountX' && cellMoney.length > 0) {
         singleAmtVal = cellMoney[0].value;
       } else if (nearestKey === 'currencyX') {
@@ -640,7 +685,7 @@ function tryParseBankColumnGuided(
       const tokens = extractMoneyTokens(line.fullText);
       if (tokens.length >= 2) {
         finalAmount = tokens[0].value;
-        balanceVal = Math.abs(tokens[tokens.length - 1].value);
+        balanceVal = tokens[tokens.length - 1].value;
       } else if (tokens.length === 1) {
         finalAmount = tokens[0].value;
       }
@@ -821,7 +866,7 @@ export async function parsePdfStatement(
     if (moomooRes && moomooRes.rows.length > 0) {
       return {
         headers: moomooRes.headers,
-        rows: moomooRes.rows,
+        rows: fixInferredYears(moomooRes.rows),
         detectedPreset: 'moomoo',
         detectedCurrency,
         detectedClosingBalance: summaryClosingBalance,
@@ -838,7 +883,7 @@ export async function parsePdfStatement(
   if (columnRes && columnRes.rows.length > 0) {
     return {
       headers: columnRes.headers,
-      rows: columnRes.rows,
+      rows: fixInferredYears(columnRes.rows),
       detectedPreset,
       detectedCurrency,
       detectedClosingBalance:
@@ -857,7 +902,7 @@ export async function parsePdfStatement(
   const fallbackRes = tryParsePatternFallback(lines, statementYear, detectedCurrency);
   return {
     headers: fallbackRes.headers,
-    rows: fallbackRes.rows,
+    rows: fixInferredYears(fallbackRes.rows),
     detectedPreset,
     detectedCurrency,
     detectedClosingBalance:

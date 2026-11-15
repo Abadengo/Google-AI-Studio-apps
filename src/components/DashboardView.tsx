@@ -938,7 +938,7 @@ export function DashboardView({
                             }}
                             className="px-2 py-1 text-[11px] font-semibold bg-red-600 text-white rounded hover:bg-red-700"
                           >
-                            {tr('Eliminar', 'Delete')}
+                            {tr('Eliminar + movimientos', 'Delete + transactions')}
                           </button>
                           <button
                             type="button"

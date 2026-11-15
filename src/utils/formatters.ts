@@ -692,137 +692,98 @@ export function normalizeDateToISO(raw: string, fallbackYear?: number): string {
 
 export function parseNumericAmount(raw: string): number {
   if (!raw) return 0;
-  let working = raw.trim();
+  // Normalise unicode minus signs / non-breaking spaces that some bank exports use.
+  const working = raw.replace(/[−‒–—]/g, '-').replace(/ /g, ' ').trim();
   const isParenNegative = /^\(.*\)$/.test(working);
   const isDr = /\bDR\b/i.test(working);
+  const isTrailingMinus = /\d\s*-$/.test(working);
   let cleaned = working.replace(/[^0-9.,-]/g, '').trim();
   if (!cleaned) return 0;
+  const isNegative = cleaned.startsWith('-') || isTrailingMinus;
+  cleaned = cleaned.replace(/-/g, '');
+  if (!cleaned || !/\d/.test(cleaned)) return 0;
 
-  // Handle European format like 1.234,56 vs 1,234.56
   const lastComma = cleaned.lastIndexOf(',');
   const lastDot = cleaned.lastIndexOf('.');
-  if (lastComma > lastDot) {
-    cleaned = cleaned.replace(/\./g, '').replace(',', '.');
-  } else {
-    cleaned = cleaned.replace(/,/g, '');
+  const commaCount = (cleaned.match(/,/g) || []).length;
+  const dotCount = (cleaned.match(/\./g) || []).length;
+
+  if (lastComma >= 0 && lastDot >= 0) {
+    // Both separators present: the last one is the decimal separator.
+    if (lastComma > lastDot) {
+      cleaned = cleaned.replace(/\./g, '').replace(',', '.'); // 1.234,56
+    } else {
+      cleaned = cleaned.replace(/,/g, ''); // 1,234.56
+    }
+  } else if (lastComma >= 0) {
+    // Only commas: "1,234" / "12,345,678" are thousands, "12,50" is a decimal comma.
+    const decimals = cleaned.length - lastComma - 1;
+    const isThousands =
+      commaCount > 1 || (decimals === 3 && !/^0,/.test(cleaned));
+    cleaned = isThousands ? cleaned.replace(/,/g, '') : cleaned.replace(',', '.');
+  } else if (dotCount > 1) {
+    // "1.234.567" → thousands separators only.
+    cleaned = cleaned.replace(/\./g, '');
   }
 
   const n = Number(cleaned);
   if (!Number.isFinite(n)) return 0;
-  if ((isParenNegative || isDr) && n > 0) return -n;
+  if (isNegative || ((isParenNegative || isDr) && n > 0)) return -Math.abs(n);
   return n;
+}
+
+function hasKeyword(desc: string, keywords: string[]): boolean {
+  return keywords.some((kw) => {
+    const escaped = kw.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i').test(desc);
+  });
 }
 
 export function guessCategoryId(description: string, type: TransactionType): string {
   if (type === 'transfer') return 'cat_transfer';
-  const desc = description.toLowerCase();
+  const desc = description
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
 
   if (type === 'income') {
-    if (desc.includes('dividend') || desc.includes('div ') || desc.includes('moomoo') || desc.includes('etf')) {
+    if (hasKeyword(desc, ['dividend', 'dividends', 'dividendo', 'dividendos', 'div', 'distribution', 'moomoo', 'etf'])) {
       return 'cat_dividendos';
     }
-    if (desc.includes('interest') || desc.includes('goalsaver') || desc.includes('interés')) {
+    if (hasKeyword(desc, ['interest', 'interes', 'intereses', 'goalsaver', 'bonus interest'])) {
       return 'cat_intereses';
     }
-    if (desc.includes('salary') || desc.includes('payroll') || desc.includes('sueldo') || desc.includes('wages')) {
+    if (hasKeyword(desc, ['salary', 'payroll', 'sueldo', 'salario', 'nomina', 'wages'])) {
       return 'cat_sueldo';
     }
     return 'cat_otros_ingresos';
   }
 
-  if (
-    desc.includes('woolworths') ||
-    desc.includes('coles') ||
-    desc.includes('aldi') ||
-    desc.includes('iga') ||
-    desc.includes('super') ||
-    desc.includes('grocery') ||
-    desc.includes('market')
-  ) {
-    return 'cat_supermercado';
-  }
-  if (
-    desc.includes('uber eats') ||
-    desc.includes('doordash') ||
-    desc.includes('cafe') ||
-    desc.includes('coffee') ||
-    desc.includes('restaurant') ||
-    desc.includes('mcdonald') ||
-    desc.includes('sushi') ||
-    desc.includes('pizza') ||
-    desc.includes('bar')
-  ) {
+  if (hasKeyword(desc, ['uber eats', 'doordash', 'menulog', 'cafe', 'coffee', 'restaurant', 'restaurante', 'mcdonalds', 'mcdonald', 'kfc', 'sushi', 'pizza', 'bar', 'pub', 'bakery'])) {
     return 'cat_restaurantes';
   }
-  if (
-    desc.includes('rent') ||
-    desc.includes('alquiler') ||
-    desc.includes('mortgage') ||
-    desc.includes('strata') ||
-    desc.includes('real estate')
-  ) {
+  if (hasKeyword(desc, ['woolworths', 'coles', 'aldi', 'iga', 'supermarket', 'supermercado', 'grocery', 'groceries', 'market', 'harris farm', 'costco'])) {
+    return 'cat_supermercado';
+  }
+  if (hasKeyword(desc, ['rent', 'rental', 'alquiler', 'arriendo', 'mortgage', 'hipoteca', 'strata', 'real estate'])) {
     return 'cat_vivienda';
   }
-  if (
-    desc.includes('uber') ||
-    desc.includes('opal') ||
-    desc.includes('myki') ||
-    desc.includes('petrol') ||
-    desc.includes('bp ') ||
-    desc.includes('shell') ||
-    desc.includes('ampol') ||
-    desc.includes('train') ||
-    desc.includes('transport')
-  ) {
+  if (hasKeyword(desc, ['uber', 'didi', 'opal', 'myki', 'petrol', 'fuel', 'bp', 'shell', 'ampol', '7-eleven fuel', 'train', 'transport', 'transporte', 'parking', 'toll', 'linkt'])) {
     return 'cat_transporte';
   }
-  if (
-    desc.includes('agl') ||
-    desc.includes('origin') ||
-    desc.includes('telstra') ||
-    desc.includes('optus') ||
-    desc.includes('vodafone') ||
-    desc.includes('internet') ||
-    desc.includes('electric') ||
-    desc.includes('water') ||
-    desc.includes('gas')
-  ) {
+  if (hasKeyword(desc, ['agl', 'origin energy', 'energyaustralia', 'telstra', 'optus', 'vodafone', 'tpg', 'aussie broadband', 'internet', 'electricity', 'electric', 'water', 'gas', 'luz'])) {
     return 'cat_servicios';
   }
-  if (
-    desc.includes('netflix') ||
-    desc.includes('spotify') ||
-    desc.includes('apple') ||
-    desc.includes('amazon prime') ||
-    desc.includes('youtube') ||
-    desc.includes('disney') ||
-    desc.includes('gym')
-  ) {
+  if (hasKeyword(desc, ['netflix', 'spotify', 'apple.com', 'apple', 'icloud', 'amazon prime', 'prime video', 'youtube', 'disney', 'stan', 'binge', 'gym', 'gimnasio', 'chatgpt', 'openai'])) {
     return 'cat_suscripciones';
   }
-  if (
-    desc.includes('chemist') ||
-    desc.includes('pharmacy') ||
-    desc.includes('bupa') ||
-    desc.includes('medibank') ||
-    desc.includes('dental') ||
-    desc.includes('clinic') ||
-    desc.includes('doctor')
-  ) {
+  if (hasKeyword(desc, ['chemist', 'pharmacy', 'farmacia', 'priceline', 'bupa', 'medibank', 'hcf', 'nib', 'dental', 'dentist', 'clinic', 'doctor', 'medical', 'hospital'])) {
     return 'cat_salud';
   }
-  if (
-    desc.includes('kmart') ||
-    desc.includes('target') ||
-    desc.includes('uniqlo') ||
-    desc.includes('zara') ||
-    desc.includes('amazon') ||
-    desc.includes('ikea') ||
-    desc.includes('bunnings')
-  ) {
+  if (hasKeyword(desc, ['kmart', 'target', 'big w', 'uniqlo', 'zara', 'amazon', 'ikea', 'bunnings', 'jb hi-fi', 'jb hi fi', 'officeworks', 'myer', 'david jones'])) {
     return 'cat_compras';
   }
-  if (desc.includes('cinema') || desc.includes('hoyts') || desc.includes('ticket') || desc.includes('flight') || desc.includes('hotel')) {
+  if (hasKeyword(desc, ['cinema', 'cine', 'hoyts', 'event cinemas', 'ticket', 'ticketek', 'flight', 'qantas', 'jetstar', 'virgin australia', 'airbnb', 'booking.com', 'hotel'])) {
     return 'cat_ocio';
   }
 
@@ -895,4 +856,58 @@ export function getGoalSaverForProfile(
       currency: 'AUD',
     }
   );
+}
+
+/**
+ * Live balance of every account = initial balance + income − expenses ± transfers,
+ * converting each movement into the account's own currency.
+ * Transfers with an empty accountId are inflows from an unknown own account (imported statements).
+ */
+export function computeAccountBalances(
+  accounts: Array<{ id: string; currency: CurrencyCode; initialBalance: number }>,
+  transactions: Array<{
+    type: TransactionType;
+    amount: number;
+    currency: CurrencyCode;
+    accountId: string;
+    toAccountId?: string;
+  }>,
+  rates: ExchangeRates
+): Map<string, number> {
+  const byId = new Map(accounts.map((a) => [a.id, a]));
+  const balances = new Map<string, number>();
+  for (const acc of accounts) balances.set(acc.id, Number(acc.initialBalance) || 0);
+
+  const apply = (accountId: string | undefined, amount: number, currency: CurrencyCode, sign: 1 | -1) => {
+    if (!accountId) return;
+    const acc = byId.get(accountId);
+    if (!acc) return;
+    const val = convertCurrency(amount, currency, acc.currency, rates);
+    balances.set(acc.id, (balances.get(acc.id) || 0) + sign * val);
+  };
+
+  for (const tx of transactions) {
+    if (tx.type === 'income') apply(tx.accountId, tx.amount, tx.currency, 1);
+    else if (tx.type === 'expense') apply(tx.accountId, tx.amount, tx.currency, -1);
+    else if (tx.type === 'transfer') {
+      apply(tx.accountId, tx.amount, tx.currency, -1);
+      apply(tx.toAccountId, tx.amount, tx.currency, 1);
+    }
+  }
+  return balances;
+}
+
+/** Download a Blob as a file. Revokes the object URL after the click has been processed. */
+export function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 1500);
 }
